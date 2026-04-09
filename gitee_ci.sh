@@ -189,7 +189,7 @@ do_clean_workspace
 do_clean_pr_branch
 
 log "INFO" "repo init from Gitee manifest: $MANIFEST_URL branch: $PR_BRANCH"
-repo init -u "$MANIFEST_URL" -b "$PR_BRANCH" -m openvela.xml --depth=1 --git-lfs
+repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --depth=1 --git-lfs
 if [ $? -ne 0 ]; then
     log "ERROR" "repo init failed"
     set_comment "ci" "failed"
