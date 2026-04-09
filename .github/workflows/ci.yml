@@ -1,0 +1,95 @@
+# .github/workflows/gitee-ci.yml
+# Security hardened version
+name: Gitee CI/CT
+
+on:
+  repository_dispatch:
+    types: [gitee-pr-ci]
+
+env:
+  GITEE_API_TOKEN: ${{ secrets.GITEE_API_TOKEN }}
+  GITEE_API_URL: https://gitee.com/api/v5
+  # LOG_AUTH_TOKEN stored as GitHub Secret, NOT passed via dispatch payload
+  LOG_AUTH_TOKEN: ${{ secrets.LOG_AUTH_TOKEN }}
+
+jobs:
+  ci-ct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Parse and validate dispatch payload
+        id: parse
+        run: |
+          # Extract fields using jq for safe JSON parsing (no shell injection)
+          PAYLOAD='${{ toJSON(github.event.client_payload) }}'
+
+          echo "org=$(echo "$PAYLOAD" | jq -r '.org // empty')" >> $GITHUB_OUTPUT
+          echo "repo=$(echo "$PAYLOAD" | jq -r '.repo // empty')" >> $GITHUB_OUTPUT
+          echo "pr_id=$(echo "$PAYLOAD" | jq -r '.pr_id // empty')" >> $GITHUB_OUTPUT
+          echo "pr_branch=$(echo "$PAYLOAD" | jq -r '.pr_branch // empty')" >> $GITHUB_OUTPUT
+          echo "manifest_url=$(echo "$PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
+          echo "repo_http_url=$(echo "$PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
+          echo "jenkins_build_url=$(echo "$PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
+          echo "log_push_url=$(echo "$PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
+          echo "build_id=$(echo "$PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
+
+          # Write PR description to file (avoid shell injection)
+          echo "$PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_description.txt
+
+          # Validate required fields
+          for field in org repo pr_id pr_branch; do
+            val=$(echo "$PAYLOAD" | jq -r ".$field // empty")
+            if [ -z "$val" ]; then
+              echo "::error::Missing required field: $field"
+              exit 1
+            fi
+          done
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci-scripts
+
+      - name: Run CI/CT with log streaming
+        env:
+          ORG_NAME: ${{ steps.parse.outputs.org }}
+          REPO_NAME: ${{ steps.parse.outputs.repo }}
+          PR_ID: ${{ steps.parse.outputs.pr_id }}
+          PR_BRANCH: ${{ steps.parse.outputs.pr_branch }}
+          MANIFEST_URL: ${{ steps.parse.outputs.manifest_url }}
+          REPO_HTTP_URL: ${{ steps.parse.outputs.repo_http_url }}
+          BUILD_URL: ${{ steps.parse.outputs.jenkins_build_url }}
+          PR_DESCRIPTION_FILE: /tmp/pr_description.txt
+          LOG_PUSH_URL: ${{ steps.parse.outputs.log_push_url }}
+        run: |
+          LOG_FILE=/tmp/ci_output.log
+          chmod +x ci-scripts/gitee_ci.sh ci-scripts/log_pusher.sh
+
+          # Start log pusher in background
+          # LOG_AUTH_TOKEN comes from GitHub Secrets, not dispatch payload
+          LOG_FILE=$LOG_FILE \
+          JENKINS_LOG_URL=$LOG_PUSH_URL \
+          AUTH_TOKEN=$LOG_AUTH_TOKEN \
+          PUSH_INTERVAL=10 \
+            ci-scripts/log_pusher.sh &
+          LOG_PUSHER_PID=$!
+
+          # Run CI, tee all output to log file
+          cd ${{ github.workspace }}
+          ci-scripts/gitee_ci.sh 2>&1 | tee $LOG_FILE
+          CI_EXIT=${PIPESTATUS[0]}
+
+          # Wait for log pusher to finish sending
+          sleep 15
+          kill $LOG_PUSHER_PID 2>/dev/null || true
+
+          # Final push with completion marker
+          if [ -n "$LOG_PUSH_URL" ]; then
+            curl -s -X POST \
+              -H "Content-Type: text/plain" \
+              -H "X-Auth-Token: $LOG_AUTH_TOKEN" \
+              -d "__LOG_STREAM_COMPLETE__" \
+              "$LOG_PUSH_URL" || true
+          fi
+
+          exit $CI_EXIT
