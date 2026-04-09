@@ -1,40 +1,38 @@
-# .github/workflows/gitee-ci.yml
-# Security hardened version
+# .github/workflows/ci.yml
+# Security: Secrets isolated from user code execution
 name: Gitee CI/CT
 
 on:
   repository_dispatch:
     types: [gitee-pr-ci]
 
-env:
-  GITEE_API_TOKEN: ${{ secrets.GITEE_API_TOKEN }}
-  GITEE_API_URL: https://gitee.com/api/v5
-  # LOG_AUTH_TOKEN stored as GitHub Secret, NOT passed via dispatch payload
-  LOG_AUTH_TOKEN: ${{ secrets.LOG_AUTH_TOKEN }}
-
 jobs:
-  ci-ct:
+  # ============================================================
+  # Job 1: Parse payload (no secrets, no user code)
+  # ============================================================
+  parse:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      org: ${{ steps.p.outputs.org }}
+      repo: ${{ steps.p.outputs.repo }}
+      pr_id: ${{ steps.p.outputs.pr_id }}
+      pr_branch: ${{ steps.p.outputs.pr_branch }}
+      manifest_url: ${{ steps.p.outputs.manifest_url }}
+      repo_http_url: ${{ steps.p.outputs.repo_http_url }}
+      jenkins_build_url: ${{ steps.p.outputs.jenkins_build_url }}
+      log_push_url: ${{ steps.p.outputs.log_push_url }}
+      build_id: ${{ steps.p.outputs.build_id }}
+      all_pr: ${{ steps.p.outputs.all_pr }}
     steps:
-      - name: Parse and validate dispatch payload
-        id: parse
+      - name: Parse and validate payload
+        id: p
         run: |
-          # Extract fields using jq for safe JSON parsing (no shell injection)
           PAYLOAD='${{ toJSON(github.event.client_payload) }}'
 
-          echo "org=$(echo "$PAYLOAD" | jq -r '.org // empty')" >> $GITHUB_OUTPUT
-          echo "repo=$(echo "$PAYLOAD" | jq -r '.repo // empty')" >> $GITHUB_OUTPUT
-          echo "pr_id=$(echo "$PAYLOAD" | jq -r '.pr_id // empty')" >> $GITHUB_OUTPUT
-          echo "pr_branch=$(echo "$PAYLOAD" | jq -r '.pr_branch // empty')" >> $GITHUB_OUTPUT
-          echo "manifest_url=$(echo "$PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
-          echo "repo_http_url=$(echo "$PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
-          echo "jenkins_build_url=$(echo "$PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
-          echo "log_push_url=$(echo "$PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
-          echo "build_id=$(echo "$PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
-
-          # Write PR description to file (avoid shell injection)
-          echo "$PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_description.txt
+          ORG=$(echo "$PAYLOAD" | jq -r '.org // empty')
+          REPO=$(echo "$PAYLOAD" | jq -r '.repo // empty')
+          PR_ID=$(echo "$PAYLOAD" | jq -r '.pr_id // empty')
+          PR_BRANCH=$(echo "$PAYLOAD" | jq -r '.pr_branch // empty')
 
           # Validate required fields
           for field in org repo pr_id pr_branch; do
@@ -45,51 +43,192 @@ jobs:
             fi
           done
 
+          echo "org=$ORG" >> $GITHUB_OUTPUT
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "pr_id=$PR_ID" >> $GITHUB_OUTPUT
+          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
+          echo "manifest_url=$(echo "$PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
+          echo "repo_http_url=$(echo "$PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
+          echo "jenkins_build_url=$(echo "$PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
+          echo "log_push_url=$(echo "$PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
+          echo "build_id=$(echo "$PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
+
+          # Parse PR description for depends-on, build ALL_PR list
+          echo "$PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
+          DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          PR_LIST="$CURRENT_PR $DEPENDS"
+          # Deduplicate
+          PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
+
+          # Build ALL_PR (org/repo:pr_num), validate format strictly
+          ALL_PR=""
+          for url in $PR_LIST; do
+            if echo "$url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
+              pair=$(echo "$url" | sed -n 's#https://gitee.com/\([^/]\+/[^/]\+\)/pulls/\([0-9]\+\)#\1:\2#p')
+              [ -n "$pair" ] && ALL_PR="$ALL_PR $pair"
+            fi
+          done
+          # Manifest PR first
+          manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
+          if [ -n "$manifest_part" ]; then
+            rest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
+            ALL_PR="$manifest_part $rest"
+          fi
+          ALL_PR=$(echo $ALL_PR | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          echo "Parsed ALL_PR: $ALL_PR"
+
+  # ============================================================
+  # Job 2: Notify start (has Secrets, no user code)
+  # ============================================================
+  notify-start:
+    needs: parse
+    runs-on: ubuntu-latest
+    env:
+      GITEE_API_TOKEN: ${{ secrets.GITEE_API_TOKEN }}
+      GITEE_API_URL: https://gitee.com/api/v5
+    steps:
+      - name: Comment and reset labels on all PRs
+        run: |
+          ALL_PR="${{ needs.parse.outputs.all_pr }}"
+          BUILD_URL="${{ needs.parse.outputs.jenkins_build_url }}"
+
+          for PR_INFO in $ALL_PR; do
+            REPO_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1)
+            PR_NUM=$(echo "$PR_INFO" | cut -d ':' -f 2)
+
+            # Reset old ci/ct labels
+            labels=$(curl -s -H "Authorization: Bearer $GITEE_API_TOKEN" \
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels" | jq -r '.[].name // empty')
+            for label in $labels; do
+              if [[ $label == ci-* ]] || [[ $label == ct-* ]]; then
+                encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$label', safe=''))")
+                curl -s -X DELETE -H "Authorization: Bearer $GITEE_API_TOKEN" \
+                  "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels/$encoded" > /dev/null
+              fi
+            done
+
+            # Post start comment
+            body=$(jq -nc --arg b "cict 已触发，查看详情: $BUILD_URL" '{"body": $b}')
+            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$body" \
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments" > /dev/null
+          done
+
+  # ============================================================
+  # Job 3: CI/CT execution (NO SECRETS - safe from malicious code)
+  # ============================================================
+  ci-ct:
+    needs: [parse, notify-start]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      # Only non-sensitive values, NO tokens
+      ORG_NAME: ${{ needs.parse.outputs.org }}
+      REPO_NAME: ${{ needs.parse.outputs.repo }}
+      PR_ID: ${{ needs.parse.outputs.pr_id }}
+      PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
+      MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
+      REPO_HTTP_URL: ${{ needs.parse.outputs.repo_http_url }}
+      ALL_PR: ${{ needs.parse.outputs.all_pr }}
+    outputs:
+      result: ${{ steps.ci.outputs.result }}
+    steps:
       - name: Checkout CI scripts
         uses: actions/checkout@v4
-        with:
-          path: ci-scripts
 
-      - name: Run CI/CT with log streaming
-        env:
-          ORG_NAME: ${{ steps.parse.outputs.org }}
-          REPO_NAME: ${{ steps.parse.outputs.repo }}
-          PR_ID: ${{ steps.parse.outputs.pr_id }}
-          PR_BRANCH: ${{ steps.parse.outputs.pr_branch }}
-          MANIFEST_URL: ${{ steps.parse.outputs.manifest_url }}
-          REPO_HTTP_URL: ${{ steps.parse.outputs.repo_http_url }}
-          BUILD_URL: ${{ steps.parse.outputs.jenkins_build_url }}
-          PR_DESCRIPTION_FILE: /tmp/pr_description.txt
-          LOG_PUSH_URL: ${{ steps.parse.outputs.log_push_url }}
+      - name: Run CI/CT (no secrets in environment)
+        id: ci
         run: |
-          LOG_FILE=/tmp/ci_output.log
-          chmod +x ci-scripts/gitee_ci.sh ci-scripts/log_pusher.sh
+          chmod +x gitee_ci.sh
 
-          # Start log pusher in background
-          # LOG_AUTH_TOKEN comes from GitHub Secrets, not dispatch payload
-          LOG_FILE=$LOG_FILE \
-          JENKINS_LOG_URL=$LOG_PUSH_URL \
-          AUTH_TOKEN=$LOG_AUTH_TOKEN \
-          PUSH_INTERVAL=10 \
-            ci-scripts/log_pusher.sh &
-          LOG_PUSHER_PID=$!
+          # Write PR description to file
+          cat > /tmp/pr_description.txt << 'PRDESC'
+          ${{ github.event.client_payload.pr_description }}
+          PRDESC
 
-          # Run CI, tee all output to log file
-          cd ${{ github.workspace }}
-          ci-scripts/gitee_ci.sh 2>&1 | tee $LOG_FILE
+          export PR_DESCRIPTION_FILE=/tmp/pr_description.txt
+          # BUILD_URL is not needed here - notify job handles comments
+          export BUILD_URL=""
+          # Disable Gitee API calls from CI script (no token available)
+          export GITEE_API_TOKEN=""
+          export SKIP_GITEE_NOTIFY=true
+
+          ./gitee_ci.sh 2>&1 | tee /tmp/ci_output.log
           CI_EXIT=${PIPESTATUS[0]}
 
-          # Wait for log pusher to finish sending
-          sleep 15
-          kill $LOG_PUSHER_PID 2>/dev/null || true
+          if [ $CI_EXIT -eq 0 ]; then
+            echo "result=success" >> $GITHUB_OUTPUT
+          else
+            echo "result=failure" >> $GITHUB_OUTPUT
+          fi
+          exit $CI_EXIT
 
-          # Final push with completion marker
-          if [ -n "$LOG_PUSH_URL" ]; then
-            curl -s -X POST \
-              -H "Content-Type: text/plain" \
-              -H "X-Auth-Token: $LOG_AUTH_TOKEN" \
-              -d "__LOG_STREAM_COMPLETE__" \
-              "$LOG_PUSH_URL" || true
+  # ============================================================
+  # Job 4: Stream logs to Jenkins (has LOG_AUTH_TOKEN, no user code)
+  # ============================================================
+  stream-logs:
+    needs: [parse, ci-ct]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      LOG_AUTH_TOKEN: ${{ secrets.LOG_AUTH_TOKEN }}
+    steps:
+      - name: Push final log status to Jenkins
+        run: |
+          LOG_PUSH_URL="${{ needs.parse.outputs.log_push_url }}"
+          RESULT="${{ needs.ci-ct.outputs.result }}"
+          [ -z "$LOG_PUSH_URL" ] && exit 0
+
+          # Send completion marker
+          curl -s -X POST \
+            -H "Content-Type: text/plain" \
+            -H "X-Auth-Token: $LOG_AUTH_TOKEN" \
+            -d "CI Result: ${RESULT:-unknown}\n=== CI COMPLETED ===" \
+            "$LOG_PUSH_URL" || true
+
+  # ============================================================
+  # Job 5: Notify result (has GITEE_API_TOKEN, no user code)
+  # ============================================================
+  notify-result:
+    needs: [parse, ci-ct]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GITEE_API_TOKEN: ${{ secrets.GITEE_API_TOKEN }}
+      GITEE_API_URL: https://gitee.com/api/v5
+    steps:
+      - name: Post result comment and labels
+        run: |
+          ALL_PR="${{ needs.parse.outputs.all_pr }}"
+          BUILD_URL="${{ needs.parse.outputs.jenkins_build_url }}"
+          RESULT="${{ needs.ci-ct.outputs.result }}"
+
+          if [ "$RESULT" = "success" ]; then
+            STATUS="success"
+            DESC="执行成功！"
+          else
+            STATUS="failed"
+            DESC="执行失败！"
           fi
 
-          exit $CI_EXIT
+          for PR_INFO in $ALL_PR; do
+            REPO_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1)
+            PR_NUM=$(echo "$PR_INFO" | cut -d ':' -f 2)
+
+            # Post result comment
+            body=$(jq -nc --arg b "cict $DESC，查看详情: $BUILD_URL" '{"body": $b}')
+            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$body" \
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments" > /dev/null
+
+            # Set labels
+            labels=$(jq -nc --arg a "ci-$STATUS" --arg b "ct-$STATUS" '[$a, $b]')
+            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$labels" \
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels" > /dev/null
+          done

@@ -65,6 +65,17 @@ set_label() {
 
 set_comment() {
     local type=$1 status=$2
+
+    # Skip if running in isolated mode (notify job handles this)
+    if [ "${SKIP_GITEE_NOTIFY:-false}" = "true" ]; then
+        log "INFO" "[$type] $status (notification skipped - isolated mode)"
+        return
+    fi
+
+    if [ -z "${GITEE_API_TOKEN:-}" ]; then
+        log "WARNING" "GITEE_API_TOKEN not set, skipping notification"
+        return
+    fi
     local desc
     case $status in
         success) desc="执行成功！" ;;
@@ -167,9 +178,11 @@ fi
 ALL_PR=$(echo $ALL_PR | xargs)
 log "INFO" "ALL_PR: $ALL_PR"
 
-# Notify start
-set_comment "cict" "start"
-reset_label
+# Notify start (skip if running in isolated mode - notify job handles this)
+if [ "${SKIP_GITEE_NOTIFY:-false}" != "true" ]; then
+    set_comment "cict" "start"
+    reset_label
+fi
 
 # --- Repo init & sync (using Gitee manifest) ---
 do_clean_workspace
