@@ -111,10 +111,17 @@ jobs:
 
             # Post start comment
             body=$(jq -nc --arg b "cict 已触发，查看详情: $BUILD_URL" '{"body": $b}')
-            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+            RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITEE_API_TOKEN" \
               -H "Content-Type: application/json" \
               -d "$body" \
-              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments" > /dev/null
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments")
+            HTTP_CODE=$(echo "$RESP" | grep "HTTP_CODE:" | cut -d: -f2)
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "WARNING: Comment to $REPO_PATH PR#$PR_NUM failed (HTTP $HTTP_CODE)"
+            else
+              echo "Posted start comment to $REPO_PATH PR#$PR_NUM"
+            fi
           done
 
   # ============================================================
@@ -214,30 +221,52 @@ jobs:
           ALL_PR="${{ needs.parse.outputs.all_pr }}"
           BUILD_URL="${{ needs.parse.outputs.jenkins_build_url }}"
           RESULT="${{ needs.ci-ct.outputs.result }}"
+          CI_CT_CONCLUSION="${{ needs.ci-ct.result }}"
+
+          echo "ci-ct job result output: $RESULT"
+          echo "ci-ct job conclusion: $CI_CT_CONCLUSION"
+          echo "ALL_PR: $ALL_PR"
 
           if [ "$RESULT" = "success" ]; then
             STATUS="success"
             DESC="执行成功！"
+          elif [ "$CI_CT_CONCLUSION" = "skipped" ]; then
+            STATUS="failed"
+            DESC="执行跳过（上游 job 失败）！"
           else
             STATUS="failed"
             DESC="执行失败！"
           fi
 
+          echo "Final status: $STATUS"
+
           for PR_INFO in $ALL_PR; do
             REPO_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1)
             PR_NUM=$(echo "$PR_INFO" | cut -d ':' -f 2)
 
+            echo "Posting to $REPO_PATH PR#$PR_NUM: $STATUS"
+
             # Post result comment
             body=$(jq -nc --arg b "cict $DESC，查看详情: $BUILD_URL" '{"body": $b}')
-            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+            RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITEE_API_TOKEN" \
               -H "Content-Type: application/json" \
               -d "$body" \
-              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments" > /dev/null
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/comments")
+            HTTP_CODE=$(echo "$RESP" | grep "HTTP_CODE:" | cut -d: -f2)
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "WARNING: Comment failed (HTTP $HTTP_CODE): $(echo "$RESP" | head -1)"
+            fi
 
             # Set labels
             labels=$(jq -nc --arg a "ci-$STATUS" --arg b "ct-$STATUS" '[$a, $b]')
-            curl -s -X POST -H "Authorization: Bearer $GITEE_API_TOKEN" \
+            RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITEE_API_TOKEN" \
               -H "Content-Type: application/json" \
               -d "$labels" \
-              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels" > /dev/null
+              "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels")
+            HTTP_CODE=$(echo "$RESP" | grep "HTTP_CODE:" | cut -d: -f2)
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "WARNING: Label failed (HTTP $HTTP_CODE): $(echo "$RESP" | head -1)"
+            fi
           done
