@@ -138,7 +138,15 @@ jobs:
       result: ${{ steps.ci.outputs.result }}
     steps:
       - name: Checkout CI scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          # Install repo tool
+          sudo curl -s -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+          sudo chmod a+x /usr/local/bin/repo
 
       - name: Run CI/CT (no secrets in environment)
         id: ci
