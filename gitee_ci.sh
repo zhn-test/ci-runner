@@ -203,33 +203,39 @@ do_build() {
 
 CURRENT_PR="$GITEE_URL/$ORG_NAME/$REPO_NAME/pulls/$PR_ID"
 
-# Parse depends-on from PR description
-PR_DESC_FILE="${PR_DESCRIPTION_FILE:-/tmp/pr_description.txt}"
-DEPENDS_ON=""
-if [ -f "$PR_DESC_FILE" ]; then
-    DEPENDS_ON=$(grep -oP 'depends-on:\s*\[[^]]+\]' "$PR_DESC_FILE" 2>/dev/null || true)
-fi
-PR_LIST=$(echo "$DEPENDS_ON" | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-PR_LIST="$CURRENT_PR $PR_LIST"
-PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
-log "INFO" "PR_LIST: $PR_LIST"
-
-# Build ALL_PR pairs with strict validation
-ALL_PR=""
-for pr_url in $PR_LIST; do
-    if echo "$pr_url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
-        repo_pr=$(echo "$pr_url" | sed -n 's#https://gitee.com/\([^/]\+/[^/]\+\)/pulls/\([0-9]\+\)#\1:\2#p')
-        [ -n "$repo_pr" ] && ALL_PR="$ALL_PR $repo_pr"
-    else
-        log "WARNING" "Skipping invalid PR URL: $pr_url"
+# Parse depends-on from PR description, or use pre-parsed ALL_PR from env
+if [ -n "${PR_DEPENDS_ON:-}" ]; then
+    # ALL_PR already parsed by parse job (safe, validated)
+    ALL_PR="$PR_DEPENDS_ON"
+    log "INFO" "Using pre-parsed ALL_PR: $ALL_PR"
+else
+    PR_DESC_FILE="${PR_DESCRIPTION_FILE:-/tmp/pr_description.txt}"
+    DEPENDS_ON=""
+    if [ -f "$PR_DESC_FILE" ]; then
+        DEPENDS_ON=$(grep -oP 'depends-on:\s*\[[^]]+\]' "$PR_DESC_FILE" 2>/dev/null || true)
     fi
-done
-manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
-if [ -n "$manifest_part" ]; then
-    without_manifest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
-    ALL_PR="$manifest_part $without_manifest"
+    PR_LIST=$(echo "$DEPENDS_ON" | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+    PR_LIST="$CURRENT_PR $PR_LIST"
+    PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
+    log "INFO" "PR_LIST: $PR_LIST"
+
+    # Build ALL_PR pairs with strict validation
+    ALL_PR=""
+    for pr_url in $PR_LIST; do
+        if echo "$pr_url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
+            repo_pr=$(echo "$pr_url" | sed -n 's#https://gitee.com/\([^/]\+/[^/]\+\)/pulls/\([0-9]\+\)#\1:\2#p')
+            [ -n "$repo_pr" ] && ALL_PR="$ALL_PR $repo_pr"
+        else
+            log "WARNING" "Skipping invalid PR URL: $pr_url"
+        fi
+    done
+    manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
+    if [ -n "$manifest_part" ]; then
+        without_manifest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
+        ALL_PR="$manifest_part $without_manifest"
+    fi
+    ALL_PR=$(echo $ALL_PR | xargs)
 fi
-ALL_PR=$(echo $ALL_PR | xargs)
 log "INFO" "ALL_PR: $ALL_PR"
 
 # Notify start

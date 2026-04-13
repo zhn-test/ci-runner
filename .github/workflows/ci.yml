@@ -6,6 +6,9 @@ on:
   repository_dispatch:
     types: [gitee-pr-ci]
 
+# Minimal permissions - each job only gets what it needs
+permissions: {}
+
 jobs:
   # ============================================================
   # Job 1: Parse payload (no secrets, no user code)
@@ -26,17 +29,19 @@ jobs:
     steps:
       - name: Parse and validate payload
         id: p
+        env:
+          # Pass payload via env to avoid shell injection from ${{ }} interpolation
+          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          PAYLOAD='${{ toJSON(github.event.client_payload) }}'
-
-          ORG=$(echo "$PAYLOAD" | jq -r '.org // empty')
-          REPO=$(echo "$PAYLOAD" | jq -r '.repo // empty')
-          PR_ID=$(echo "$PAYLOAD" | jq -r '.pr_id // empty')
-          PR_BRANCH=$(echo "$PAYLOAD" | jq -r '.pr_branch // empty')
+          # Parse from env var (safe - no shell interpolation)
+          ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
+          REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
+          PR_ID=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_id // empty')
+          PR_BRANCH=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_branch // empty')
 
           # Validate required fields
           for field in org repo pr_id pr_branch; do
-            val=$(echo "$PAYLOAD" | jq -r ".$field // empty")
+            val=$(echo "$CLIENT_PAYLOAD" | jq -r ".$field // empty")
             if [ -z "$val" ]; then
               echo "::error::Missing required field: $field"
               exit 1
@@ -47,14 +52,14 @@ jobs:
           echo "repo=$REPO" >> $GITHUB_OUTPUT
           echo "pr_id=$PR_ID" >> $GITHUB_OUTPUT
           echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
-          echo "manifest_url=$(echo "$PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
-          echo "repo_http_url=$(echo "$PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
-          echo "jenkins_build_url=$(echo "$PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
-          echo "log_push_url=$(echo "$PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
-          echo "build_id=$(echo "$PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
+          echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
+          echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
+          echo "jenkins_build_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
+          echo "log_push_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
+          echo "build_id=$(echo "$CLIENT_PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
 
           # Parse PR description for depends-on, build ALL_PR list
-          echo "$PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
           CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
           DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
           PR_LIST="$CURRENT_PR $DEPENDS"
@@ -157,18 +162,15 @@ jobs:
 
       - name: Run CI/CT (no secrets in environment)
         id: ci
+        env:
+          PR_DEPENDS_ON: ${{ needs.parse.outputs.all_pr }}
         run: |
           chmod +x gitee_ci.sh
 
-          # Write PR description to file
-          cat > /tmp/pr_description.txt << 'PRDESC'
-          ${{ github.event.client_payload.pr_description }}
-          PRDESC
-
-          export PR_DESCRIPTION_FILE=/tmp/pr_description.txt
-          # BUILD_URL is not needed here - notify job handles comments
+          # PR description already parsed in parse job, pass depends-on via env
+          # Do NOT inline pr_description - it's user-controlled input
+          export PR_DESCRIPTION_FILE=/dev/null
           export BUILD_URL=""
-          # Disable Gitee API calls from CI script (no token available)
           export GITEE_API_TOKEN=""
           export SKIP_GITEE_NOTIFY=true
 
