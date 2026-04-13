@@ -6,7 +6,7 @@ on:
   repository_dispatch:
     types: [gitee-pr-ci]
 
-# Minimal permissions - each job only gets what it needs
+# Minimal permissions
 permissions: {}
 
 jobs:
@@ -23,23 +23,18 @@ jobs:
       manifest_url: ${{ steps.p.outputs.manifest_url }}
       repo_http_url: ${{ steps.p.outputs.repo_http_url }}
       jenkins_build_url: ${{ steps.p.outputs.jenkins_build_url }}
-      log_push_url: ${{ steps.p.outputs.log_push_url }}
-      build_id: ${{ steps.p.outputs.build_id }}
       all_pr: ${{ steps.p.outputs.all_pr }}
     steps:
       - name: Parse and validate payload
         id: p
         env:
-          # Pass payload via env to avoid shell injection from ${{ }} interpolation
           CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          # Parse from env var (safe - no shell interpolation)
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
           PR_ID=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_id // empty')
           PR_BRANCH=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_branch // empty')
 
-          # Validate required fields
           for field in org repo pr_id pr_branch; do
             val=$(echo "$CLIENT_PAYLOAD" | jq -r ".$field // empty")
             if [ -z "$val" ]; then
@@ -55,18 +50,14 @@ jobs:
           echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
           echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
           echo "jenkins_build_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.jenkins_build_url // empty')" >> $GITHUB_OUTPUT
-          echo "log_push_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.log_push_url // empty')" >> $GITHUB_OUTPUT
-          echo "build_id=$(echo "$CLIENT_PAYLOAD" | jq -r '.build_id // empty')" >> $GITHUB_OUTPUT
 
-          # Parse PR description for depends-on, build ALL_PR list
+          # Parse PR description for depends-on
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
           CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
           DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
           PR_LIST="$CURRENT_PR $DEPENDS"
-          # Deduplicate
           PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
 
-          # Build ALL_PR (org/repo:pr_num), validate format strictly
           ALL_PR=""
           for url in $PR_LIST; do
             if echo "$url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
@@ -74,7 +65,6 @@ jobs:
               [ -n "$pair" ] && ALL_PR="$ALL_PR $pair"
             fi
           done
-          # Manifest PR first
           manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
           if [ -n "$manifest_part" ]; then
             rest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
@@ -103,7 +93,6 @@ jobs:
             REPO_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1)
             PR_NUM=$(echo "$PR_INFO" | cut -d ':' -f 2)
 
-            # Reset old ci/ct labels
             labels=$(curl -s -H "Authorization: Bearer $GITEE_API_TOKEN" \
               "$GITEE_API_URL/repos/$REPO_PATH/pulls/$PR_NUM/labels" | jq -r '.[].name // empty')
             for label in $labels; do
@@ -114,7 +103,6 @@ jobs:
               fi
             done
 
-            # Post start comment
             body=$(jq -nc --arg b "cict 已触发，查看详情: $BUILD_URL" '{"body": $b}')
             RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
               -H "Authorization: Bearer $GITEE_API_TOKEN" \
@@ -138,7 +126,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
-      # Only non-sensitive values, NO tokens
       ORG_NAME: ${{ needs.parse.outputs.org }}
       REPO_NAME: ${{ needs.parse.outputs.repo }}
       PR_ID: ${{ needs.parse.outputs.pr_id }}
@@ -156,7 +143,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq
-          # Install repo tool
           sudo curl -s -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
           sudo chmod a+x /usr/local/bin/repo
 
@@ -166,9 +152,6 @@ jobs:
           PR_DEPENDS_ON: ${{ needs.parse.outputs.all_pr }}
         run: |
           chmod +x gitee_ci.sh
-
-          # PR description already parsed in parse job, pass depends-on via env
-          # Do NOT inline pr_description - it's user-controlled input
           export PR_DESCRIPTION_FILE=/dev/null
           export BUILD_URL=""
           export GITEE_API_TOKEN=""
@@ -185,30 +168,7 @@ jobs:
           exit $CI_EXIT
 
   # ============================================================
-  # Job 4: Stream logs to Jenkins (has LOG_AUTH_TOKEN, no user code)
-  # ============================================================
-  stream-logs:
-    needs: [parse, ci-ct]
-    if: always()
-    runs-on: ubuntu-latest
-    env:
-      LOG_AUTH_TOKEN: ${{ secrets.LOG_AUTH_TOKEN }}
-    steps:
-      - name: Push final log status to Jenkins
-        run: |
-          LOG_PUSH_URL="${{ needs.parse.outputs.log_push_url }}"
-          RESULT="${{ needs.ci-ct.outputs.result }}"
-          [ -z "$LOG_PUSH_URL" ] && exit 0
-
-          # Send completion marker
-          curl -s -X POST \
-            -H "Content-Type: text/plain" \
-            -H "X-Auth-Token: $LOG_AUTH_TOKEN" \
-            -d "CI Result: ${RESULT:-unknown}\n=== CI COMPLETED ===" \
-            "$LOG_PUSH_URL" || true
-
-  # ============================================================
-  # Job 5: Notify result (has GITEE_API_TOKEN, no user code)
+  # Job 4: Notify result (has GITEE_API_TOKEN, no user code)
   # ============================================================
   notify-result:
     needs: [parse, ci-ct]
@@ -248,7 +208,6 @@ jobs:
 
             echo "Posting to $REPO_PATH PR#$PR_NUM: $STATUS"
 
-            # Post result comment
             body=$(jq -nc --arg b "cict $DESC，查看详情: $BUILD_URL" '{"body": $b}')
             RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
               -H "Authorization: Bearer $GITEE_API_TOKEN" \
@@ -260,7 +219,6 @@ jobs:
               echo "WARNING: Comment failed (HTTP $HTTP_CODE): $(echo "$RESP" | head -1)"
             fi
 
-            # Set labels
             labels=$(jq -nc --arg a "ci-$STATUS" --arg b "ct-$STATUS" '[$a, $b]')
             RESP=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
               -H "Authorization: Bearer $GITEE_API_TOKEN" \
