@@ -115,7 +115,7 @@ fetch_build_configs() {
         ci_file_url="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
     fi
 
-    log "INFO" "Fetching build configs from: $ci_file_url"
+    log "INFO" "Fetching build configs from: $ci_file_url" >&2
     local ci_content
     ci_content=$(curl -s "$ci_file_url" 2>/dev/null || echo "")
 
