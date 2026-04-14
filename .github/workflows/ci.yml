@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   # ============================================================
-  # Job 1: Parse payload (no secrets, no user code)
+  # Job 1: Parse payload
   # ============================================================
   parse:
     runs-on: ubuntu-latest
@@ -22,6 +22,7 @@ jobs:
       manifest_url: ${{ steps.p.outputs.manifest_url }}
       repo_http_url: ${{ steps.p.outputs.repo_http_url }}
       all_pr: ${{ steps.p.outputs.all_pr }}
+      matrix: ${{ steps.p.outputs.matrix }}
     steps:
       - name: Parse and validate payload
         id: p
@@ -48,7 +49,7 @@ jobs:
           echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
           echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
 
-          # Parse PR description for depends-on
+          # Parse depends-on
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
           CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
           DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
@@ -69,25 +70,60 @@ jobs:
           fi
           ALL_PR=$(echo $ALL_PR | xargs)
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          echo "Parsed ALL_PR: $ALL_PR"
+
+          # Fetch build matrix from public-actions
+          if [ "$PR_BRANCH" = "dev" ]; then
+            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
+          else
+            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
+          fi
+          echo "Fetching matrix from: $CI_URL" >&2
+          CI_YAML=$(curl -s "$CI_URL")
+
+          # Parse matrix into JSON: {"include":[{"group":"ubuntu22-01","tasks":["task1","task2"]},...]}}
+          MATRIX=$(echo "$CI_YAML" | python3 -c "
+          import sys, re, json
+          content = sys.stdin.read()
+          groups = []
+          current_group = None
+          current_tasks = []
+          in_tasks = False
+          for line in content.split('\n'):
+              s = line.strip()
+              if '- group:' in s:
+                  if current_group and current_tasks:
+                      groups.append({'group': current_group, 'tasks': current_tasks})
+                  current_group = s.split('- group:')[1].strip().split('#')[0].strip()
+                  current_tasks = []
+                  in_tasks = False
+              elif 'tasks:' in s and current_group:
+                  in_tasks = True
+                  # inline array?
+                  m = re.search(r'tasks:\s*\[([^\]]+)\]', s)
+                  if m:
+                      for t in m.group(1).split(','):
+                          t = t.strip().strip('\"').strip(\"'\")
+                          if t: current_tasks.append(t)
+                      in_tasks = False
+              elif in_tasks and s.startswith('- '):
+                  t = s[2:].strip().strip('\"').strip(\"'\")
+                  if t and not t.startswith('#'):
+                      current_tasks.append(t)
+              elif in_tasks and s and not s.startswith('#') and not s.startswith('-'):
+                  in_tasks = False
+          if current_group and current_tasks:
+              groups.append({'group': current_group, 'tasks': current_tasks})
+          print(json.dumps({'include': groups}))
+          ")
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX" >&2
 
   # ============================================================
-  # Job 2: CI/CT execution (NO SECRETS at all)
+  # Job 2: Setup - repo sync + cherry-pick (shared across groups)
   # ============================================================
-  ci-ct:
+  setup:
     needs: parse
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    env:
-      ORG_NAME: ${{ needs.parse.outputs.org }}
-      REPO_NAME: ${{ needs.parse.outputs.repo }}
-      PR_ID: ${{ needs.parse.outputs.pr_id }}
-      PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
-      MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
-      REPO_HTTP_URL: ${{ needs.parse.outputs.repo_http_url }}
-      ALL_PR: ${{ needs.parse.outputs.all_pr }}
-    outputs:
-      result: ${{ steps.ci.outputs.result }}
     steps:
       - name: Checkout CI scripts
         uses: actions/checkout@v5
@@ -99,23 +135,164 @@ jobs:
           sudo curl -s -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
           sudo chmod a+x /usr/local/bin/repo
 
-      - name: Run CI/CT (no secrets in environment)
-        id: ci
+      - name: Clean up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h
+
+      - name: Repo Init and Sync
         env:
-          PR_DEPENDS_ON: ${{ needs.parse.outputs.all_pr }}
+          PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
+          MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
+        run: |
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --depth=1 --git-lfs
+          repo sync -c -d --no-tags --force-sync -j$(nproc)
+          repo manifest -r -o snapshot.xml
+
+      - name: Cherry-pick PRs
+        env:
+          ALL_PR: ${{ needs.parse.outputs.all_pr }}
         run: |
           chmod +x gitee_ci.sh
-          export PR_DESCRIPTION_FILE=/dev/null
-          export BUILD_URL=""
-          export GITEE_API_TOKEN=""
-          export SKIP_GITEE_NOTIFY=true
+          git config --global user.email "openvela-robot@xiaomi.com"
+          git config --global user.name "openvela-robot"
 
-          ./gitee_ci.sh 2>&1 | tee /tmp/ci_output.log
-          CI_EXIT=${PIPESTATUS[0]}
+          for PR_INFO in $ALL_PR; do
+            REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
+            PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
+            PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
 
-          if [ $CI_EXIT -eq 0 ]; then
-            echo "result=success" >> $GITHUB_OUTPUT
-          else
-            echo "result=failure" >> $GITHUB_OUTPUT
-          fi
-          exit $CI_EXIT
+            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
+              echo "Skipping invalid PR: $PR_INFO"
+              continue
+            fi
+
+            if [ "$PROJECT_NAME" = "manifests" ]; then
+              cd .repo/manifests
+              git fetch origin "pull/$PR_NUMBER/head:pr-branch"
+              git cherry-pick $(git rev-list --reverse HEAD..pr-branch)
+              cd -
+              repo sync -c -d --no-tags --force-sync -j$(nproc)
+            else
+              REPO_PATH=$(grep "\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | awk -F'"' '{print $2}')
+              if [ -z "$REPO_PATH" ]; then
+                echo "WARNING: Could not find path for $PROJECT_NAME, skipping"
+                continue
+              fi
+              cd "$REPO_PATH"
+              git fetch "https://gitee.com/$REPO_FULL_PATH.git" "pull/$PR_NUMBER/head:pr-branch"
+              git cherry-pick $(git rev-list --reverse HEAD..pr-branch)
+              cd -
+            fi
+          done
+
+      - name: Upload snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot
+          path: snapshot.xml
+
+  # ============================================================
+  # Job 3: CI tasks - parallel by group, build inside Docker
+  # ============================================================
+  ci-tasks:
+    needs: [parse, setup]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
+      fail-fast: false
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+    steps:
+      - name: Download snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install repo
+        run: |
+          mkdir ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Repo Init and Sync from snapshot
+        env:
+          PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
+          MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
+        run: |
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --depth=1 --git-lfs
+          cp snapshot.xml .repo/manifests/
+          repo init -m snapshot.xml --depth=1 --git-lfs
+          repo sync -c -d --no-tags --force-sync -j$(nproc)
+          df -h
+
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Docker Pull
+        run: docker pull ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx
+
+      - name: Clean up disk space
+        run: |
+          sudo apt-get clean
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker builder prune -a 2>/dev/null || true
+          df -h
+
+      - name: Run CI tasks in Docker
+        env:
+          CI_MATRIX_GROUP: ${{ matrix.group }}
+        run: |
+          WORKSPACE=$(pwd)
+          for task in ${{ join(matrix.tasks, ' ') }}; do
+            echo "=== Building: $task ==="
+            cmake_flag=""
+            cp_base_dir="nuttx"
+            if [[ "$task" == *@* ]]; then
+              cmake_flag="--cmake"
+              task_name=$(echo "$task" | awk -F '@' '{print $1}')
+              cp_base_dir="cmake_out/*"
+            else
+              task_name="$task"
+            fi
+
+            if [[ "$task_name" == *:* ]] || [[ "$task_name" == *vendor/* ]] || [[ "$task_name" == ./* ]]; then
+              build_cmd="./build.sh $task_name $cmake_flag -e -Werror -j$(nproc)"
+            else
+              build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task_name $cmake_flag -e -Werror -j$(nproc)"
+            fi
+
+            echo "Build command: $build_cmd"
+            docker run --rm \
+              -v "${WORKSPACE}":/workspace \
+              -w /workspace \
+              ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest \
+              /bin/bash -c "df -h && $build_cmd"
+
+            echo "=== Cleaning up after $task ==="
+            sudo repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
+            sudo rm -rf cmake_out || true
+          done
+
+      - name: Check status
+        id: check
+        if: always()
+        run: echo "status=${{ job.status }}" >> $GITHUB_OUTPUT
