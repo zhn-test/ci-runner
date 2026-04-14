@@ -250,10 +250,20 @@ jobs:
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
           SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
         run: |
+          # Save snapshot and pr_info before repo init overwrites workspace
+          cp "$SNAPSHOT_FILE" /tmp/ 2>/dev/null || true
+          cp pr_info_* /tmp/ 2>/dev/null || true
+
           repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
-          cp "$SNAPSHOT_FILE" .repo/manifests/
+
+          # Copy snapshot into manifests and re-init with it
+          cp "/tmp/$SNAPSHOT_FILE" .repo/manifests/
+          echo "Re-init with snapshot: $SNAPSHOT_FILE"
           repo init -m "$SNAPSHOT_FILE" --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
+
+          # Restore pr_info for cherry-pick step
+          cp /tmp/pr_info_* . 2>/dev/null || true
           df -h
 
       - name: Cherry-pick PRs
