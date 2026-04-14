@@ -1,5 +1,5 @@
 # .github/workflows/ci.yml
-# Security: No Gitee credentials on GitHub side. Jenkins handles all Gitee interactions.
+# Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
 on:
@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   # ============================================================
-  # Job 1: Parse payload
+  # Job 1: Parse payload + fetch matrix
   # ============================================================
   parse:
     runs-on: ubuntu-latest
@@ -79,8 +79,6 @@ jobs:
           fi
           echo "Fetching matrix from: $CI_URL" >&2
           CI_YAML=$(curl -s "$CI_URL")
-
-          # Parse matrix into JSON: {"include":[{"group":"ubuntu22-01","tasks":["task1","task2"]},...]}}
           MATRIX=$(echo "$CI_YAML" | python3 -c "
           import sys, re, json
           content = sys.stdin.read()
@@ -98,7 +96,6 @@ jobs:
                   in_tasks = False
               elif 'tasks:' in s and current_group:
                   in_tasks = True
-                  # inline array?
                   m = re.search(r'tasks:\s*\[([^\]]+)\]', s)
                   if m:
                       for t in m.group(1).split(','):
@@ -119,11 +116,14 @@ jobs:
           echo "Matrix: $MATRIX" >&2
 
   # ============================================================
-  # Job 2: Setup - repo sync + cherry-pick (shared across groups)
+  # Job 2: Setup - repo sync, record PR info, generate snapshot
+  #         (NO cherry-pick here - done in each ci-tasks group)
   # ============================================================
   setup:
     needs: parse
     runs-on: ubuntu-latest
+    outputs:
+      snapshot: ${{ steps.snapshot.outputs.name }}
     steps:
       - name: Checkout CI scripts
         uses: actions/checkout@v5
@@ -147,55 +147,70 @@ jobs:
           PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
         run: |
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --depth=1 --git-lfs
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
-          repo manifest -r -o snapshot.xml
 
-      - name: Cherry-pick PRs
+      - name: Generate snapshot and PR info
+        id: snapshot
         env:
           ALL_PR: ${{ needs.parse.outputs.all_pr }}
+          ORG: ${{ needs.parse.outputs.org }}
+          REPO: ${{ needs.parse.outputs.repo }}
+          PR_ID: ${{ needs.parse.outputs.pr_id }}
         run: |
-          chmod +x gitee_ci.sh
-          git config --global user.email "openvela-robot@xiaomi.com"
-          git config --global user.name "openvela-robot"
+          SNAPSHOT_NAME="snapshot_${ORG}_${REPO}_${PR_ID}"
+          PR_INFO_FILE="pr_info_${ORG}_${REPO}_${PR_ID}"
 
+          # Generate snapshot (frozen manifest with exact commit SHAs)
+          repo manifest -r -o "$SNAPSHOT_NAME"
+
+          # Record PR commit info for each dependency
+          # Format: repo_name:commit_sha (one per line)
           for PR_INFO in $ALL_PR; do
             REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
             PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
             PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
 
             if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
-              echo "Skipping invalid PR: $PR_INFO"
               continue
             fi
 
             if [ "$PROJECT_NAME" = "manifests" ]; then
               cd .repo/manifests
               git fetch origin "pull/$PR_NUMBER/head:pr-branch"
-              git cherry-pick $(git rev-list --reverse HEAD..pr-branch)
+              LATEST_SHA=$(git rev-parse pr-branch)
               cd -
-              repo sync -c -d --no-tags --force-sync -j$(nproc)
             else
               REPO_PATH=$(grep "\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | awk -F'"' '{print $2}')
               if [ -z "$REPO_PATH" ]; then
-                echo "WARNING: Could not find path for $PROJECT_NAME, skipping"
+                echo "WARNING: Could not find path for $PROJECT_NAME"
                 continue
               fi
               cd "$REPO_PATH"
               git fetch "https://gitee.com/$REPO_FULL_PATH.git" "pull/$PR_NUMBER/head:pr-branch"
-              git cherry-pick $(git rev-list --reverse HEAD..pr-branch)
+              LATEST_SHA=$(git rev-parse pr-branch)
               cd -
             fi
+            echo "${REPO_FULL_PATH}:${PR_NUMBER}:${LATEST_SHA}" >> "$PR_INFO_FILE"
+            echo "Recorded: ${REPO_FULL_PATH} PR#${PR_NUMBER} SHA=${LATEST_SHA}"
           done
 
-      - name: Upload snapshot
+          # Create empty PR_INFO_FILE if no PRs
+          touch "$PR_INFO_FILE"
+
+          echo "name=$SNAPSHOT_NAME" >> $GITHUB_OUTPUT
+          echo "pr_info=$PR_INFO_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload snapshot and PR info
         uses: actions/upload-artifact@v4
         with:
-          name: snapshot
-          path: snapshot.xml
+          name: source_info
+          path: |
+            ${{ steps.snapshot.outputs.name }}
+            pr_info_*
 
   # ============================================================
-  # Job 3: CI tasks - parallel by group, build inside Docker
+  # Job 3: CI tasks - parallel by group, cherry-pick + Docker build
   # ============================================================
   ci-tasks:
     needs: [parse, setup]
@@ -206,10 +221,10 @@ jobs:
     outputs:
       status: ${{ steps.check.outputs.status }}
     steps:
-      - name: Download snapshot
+      - name: Download snapshot and PR info
         uses: actions/download-artifact@v4
         with:
-          name: snapshot
+          name: source_info
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -233,12 +248,64 @@ jobs:
         env:
           PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
+          SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
         run: |
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --depth=1 --git-lfs
-          cp snapshot.xml .repo/manifests/
-          repo init -m snapshot.xml --depth=1 --git-lfs
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
+          cp "$SNAPSHOT_FILE" .repo/manifests/
+          repo init -m "$SNAPSHOT_FILE" --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
           df -h
+
+      - name: Cherry-pick PRs
+        env:
+          ALL_PR: ${{ needs.parse.outputs.all_pr }}
+          SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
+        run: |
+          git config --global user.email "openvela-robot@xiaomi.com"
+          git config --global user.name "openvela-robot"
+
+          PR_INFO_FILE=$(ls pr_info_* 2>/dev/null | head -1)
+          if [ -z "$PR_INFO_FILE" ] || [ ! -s "$PR_INFO_FILE" ]; then
+            echo "No PRs to cherry-pick"
+            exit 0
+          fi
+
+          for PR_INFO in $ALL_PR; do
+            REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
+            PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
+            PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
+
+            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
+              continue
+            fi
+
+            # Get commit SHA from PR info file
+            PR_COMMIT=$(grep "^${REPO_FULL_PATH}:" "$PR_INFO_FILE" | awk -F':' '{print $3}')
+            if [ -z "$PR_COMMIT" ]; then
+              echo "WARNING: No commit info for $REPO_FULL_PATH, skipping"
+              continue
+            fi
+
+            if [ "$PROJECT_NAME" = "manifests" ]; then
+              cd .repo/manifests
+              git fetch origin "pull/$PR_NUMBER/head:pr-branch"
+              git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
+              cd -
+              repo sync -c -d --no-tags --force-sync -j$(nproc)
+            else
+              REPO_NAME=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
+              REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'path="' '{print $2}' | awk -F'"' '{print $1}')
+              [ -z "$REPO_PATH" ] && REPO_PATH="$REPO_NAME"
+              if [ -z "$REPO_PATH" ]; then
+                echo "WARNING: Could not find path for $PROJECT_NAME"
+                continue
+              fi
+              cd "$REPO_PATH"
+              git fetch openvela "pull/$PR_NUMBER/head:pr-branch"
+              git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
+              cd -
+            fi
+          done
 
       - name: Docker Login
         uses: docker/login-action@v3
@@ -250,7 +317,7 @@ jobs:
       - name: Docker Pull
         run: docker pull ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx
 
-      - name: Clean up disk space
+      - name: Clean up after Docker pull
         run: |
           sudo apt-get clean
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
@@ -285,10 +352,10 @@ jobs:
               -v "${WORKSPACE}":/workspace \
               -w /workspace \
               ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest \
-              /bin/bash -c "df -h && $build_cmd"
+              /bin/bash -c "df -h && $build_cmd && ls -atl nuttx"
 
             echo "=== Cleaning up after $task ==="
-            sudo repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
+            sudo ~/bin/repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
             sudo rm -rf cmake_out || true
           done
 
