@@ -272,6 +272,12 @@ for PR_INFO in $ALL_PR; do
     PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
     PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
 
+    # Skip invalid/placeholder PRs
+    if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
+        log "INFO" "Skipping invalid PR: $PR_INFO"
+        continue
+    fi
+
     if [ "$PROJECT_NAME" == "manifests" ]; then
         cd .repo/manifests
         git config user.email "openvela-robot@xiaomi.com"
