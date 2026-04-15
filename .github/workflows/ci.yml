@@ -260,6 +260,14 @@ jobs:
           cp "/tmp/$SNAPSHOT_FILE" .repo/manifests/
           echo "Re-init with snapshot: $SNAPSHOT_FILE"
           repo init -m "$SNAPSHOT_FILE" --group=default,platform-linux --depth=1 --git-lfs
+
+          # Verify snapshot is active
+          ACTIVE_MANIFEST=$(readlink -f .repo/manifest.xml 2>/dev/null || echo "unknown")
+          echo "Active manifest: $ACTIVE_MANIFEST"
+          echo "Snapshot file exists in manifests: $(ls -la .repo/manifests/$SNAPSHOT_FILE 2>/dev/null || echo 'NOT FOUND')"
+          echo "First 3 projects in active manifest:"
+          head -20 .repo/manifest.xml 2>/dev/null | grep '<project' | head -3
+
           repo sync -c -d --no-tags --force-sync -j$(nproc)
 
           # Restore pr_info for cherry-pick step
