@@ -101,100 +101,36 @@ do_clean_pr_branch() {
     repo forall -c 'git branch -D pr-branch' > /dev/null 2>&1 || true
 }
 
-# --- Fetch build configs from public-actions ---
-fetch_build_configs() {
-    local branch=$1
-    local ci_file_url=""
-    local configs=()
+# --- Shared matrix + executor -------------------------------------------
+# The task list and the pinned tool versions are read out of the GitHub CI
+# workflow by tools/ci/ci_matrix.py, and every task is run by
+# tools/ci/task_exec.sh. Both are shared with .github/workflows/ci.yml so there
+# is exactly one implementation of "what a task means".
+CI_TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")/tools/ci" && pwd)"
 
-    # Determine which CI file to fetch based on branch
-    if [ "$branch" = "dev" ]; then
-        ci_file_url="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
-    else
-        # trunk and other branches use trunk's ci.yml
-        ci_file_url="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
-    fi
-
-    log "INFO" "Fetching build configs from: $ci_file_url" >&2
-    local ci_content
-    ci_content=$(curl -s "$ci_file_url" 2>/dev/null || echo "")
-
-    if [ -z "$ci_content" ]; then
-        log "ERROR" "Failed to fetch CI config from public-actions"
-        return 1
-    fi
-
-    # Parse tasks from YAML matrix using python
-    python3 -c "
-import sys, re, yaml
-
-content = '''$ci_content'''
-
-# Simple extraction: find all task entries
-# Match lines like '- task_name@cmake' or '- vendor/path/config@cmake'
-tasks = []
-in_tasks = False
-for line in content.split('\n'):
-    stripped = line.strip()
-    if 'tasks:' in stripped or 'tasks: [' in stripped:
-        in_tasks = True
-        # Handle inline array format: tasks: [a, b, c]
-        m = re.search(r'tasks:\s*\[([^\]]+)\]', stripped)
-        if m:
-            for t in m.group(1).split(','):
-                t = t.strip().strip('\"').strip(\"'\")
-                if t:
-                    tasks.append(t)
-            in_tasks = False
-        continue
-    if in_tasks:
-        if stripped.startswith('- '):
-            task = stripped[2:].strip().strip('\"').strip(\"'\")
-            if task and not task.startswith('#'):
-                tasks.append(task)
-        elif stripped and not stripped.startswith('#') and not stripped.startswith('-'):
-            in_tasks = False
-
-# Deduplicate while preserving order
-seen = set()
-for t in tasks:
-    if t not in seen:
-        seen.add(t)
-        print(t)
-" 2>/dev/null
+upstream_ci_path() {
+    case "${1:-trunk}" in
+        dev)   echo ".github/workflows/ci-real.yml" ;;
+        dev-*) echo ".github/workflows/ci-real_trunk-5.5.yml" ;;
+        *)     echo ".github/workflows/ci.yml" ;;
+    esac
 }
 
-# --- Build ---
-do_build() {
-    local task=$1
-    local ncpus=$(nproc)
-    local cmake_flag=""
-    local config="$task"
+upstream_ci_ref() {
+    case "${1:-trunk}" in
+        dev|dev-*) echo "dev" ;;
+        *)         echo "trunk" ;;
+    esac
+}
 
-    # Parse @cmake suffix
-    if [[ "$task" == *@cmake ]]; then
-        cmake_flag="--cmake"
-        config="${task%@cmake}"
-    fi
-
-    # Add vendor prefix if needed (same logic as public-actions)
-    local build_config="$config"
-    if [[ "$config" != *:* ]] && [[ "$config" != vendor/* ]] && [[ "$config" != ./* ]]; then
-        build_config="vendor/openvela/boards/vela/configs/$config"
-    fi
-
-    local build_cmd="./build.sh $build_config $cmake_flag -e -Werror -j$ncpus"
-    log "INFO" "Building: $build_cmd"
-
-    if ! $build_cmd; then
-        log "ERROR" "Build failed: $task"
-        return 1
-    fi
-    log "INFO" "Build passed: $task"
-
-    # Clean up after build (same as public-actions)
-    repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
-    rm -rf cmake_out || true
+# Downloads the upstream workflow for the PR's target branch into $1.
+fetch_upstream_ci() {
+    local dest=$1 branch=$2 path ref url
+    path=$(upstream_ci_path "$branch")
+    ref=$(upstream_ci_ref "$branch")
+    url="https://raw.githubusercontent.com/open-vela/public-actions/${ref}/${path}"
+    log "INFO" "Upstream CI: $url" >&2
+    curl -fsSL "$url" -o "$dest"
 }
 
 # ============================================================
@@ -317,44 +253,75 @@ for PR_INFO in $ALL_PR; do
     cd "$WORKSPACE"
 done
 
-# --- Fetch build configs dynamically from public-actions ---
-log "INFO" "Fetching build configs for branch: $PR_BRANCH"
-BUILD_TASKS=$(fetch_build_configs "$PR_BRANCH")
-
-if [ -z "$BUILD_TASKS" ]; then
-    log "ERROR" "No build tasks found for branch $PR_BRANCH"
+# --- Resolve the task matrix from the GitHub CI workflow -----------------
+log "INFO" "Resolving the task matrix for branch: $PR_BRANCH"
+UPSTREAM_CI="$WORKSPACE/.upstream-ci.yml"
+if ! fetch_upstream_ci "$UPSTREAM_CI" "$PR_BRANCH"; then
+    log "ERROR" "Cannot fetch the upstream CI workflow for $PR_BRANCH"
     set_comment "ci" "failed"
     echo "CI_RESULT=FAILURE"
     exit 1
 fi
 
-log "INFO" "Build tasks:"
-echo "$BUILD_TASKS" | while read task; do
-    log "INFO" "  - $task"
+# Any drift the executor cannot reproduce faithfully -- an unknown task flag, a
+# missing version pin, a step upstream gates on a group name -- fails here
+# rather than silently building something different from GitHub CI.
+if ! MATRIX_JSON=$(python3 "$CI_TOOLS/ci_matrix.py" --workflow "$UPSTREAM_CI" --format matrix); then
+    log "ERROR" "Upstream CI drift; see the error above"
+    set_comment "ci" "failed"
+    echo "CI_RESULT=FAILURE"
+    exit 1
+fi
+python3 "$CI_TOOLS/ci_matrix.py" --workflow "$UPSTREAM_CI" --format report
+
+# Pins (image, build flags, NTFC versions) come from the same file.
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    export "${line?}"
+done < <(python3 "$CI_TOOLS/ci_matrix.py" --workflow "$UPSTREAM_CI" --format env)
+
+export CI_WORKSPACE="$WORKSPACE"
+export CI_TRIGGER_REPO="${REPO_NAME}"
+export CI_PR_NUMBER="${PR_ID}"
+export CI_QUIRKS_FILE="$CI_TOOLS/quirks.conf"
+
+# --- Run every group through the shared executor -------------------------
+GROUP_COUNT=$(echo "$MATRIX_JSON" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')
+log "INFO" "Groups to run: $GROUP_COUNT"
+
+FAILED_GROUPS=""
+PASSED=0
+for idx in $(seq 0 $((GROUP_COUNT - 1))); do
+    group=$(echo "$MATRIX_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['include'][$idx]['group'])")
+    tasks=$(echo "$MATRIX_JSON" | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)['include'][$idx]['tasks']))")
+    needs_ntfc=$(echo "$MATRIX_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['include'][$idx]['ntfc'])")
+
+    log "INFO" "=== group $group: $tasks ==="
+    group_failed=false
+
+    if ! bash "$CI_TOOLS/task_exec.sh" build "$group" $tasks; then
+        group_failed=true
+    fi
+
+    if [ "$group_failed" = false ] && [ "$needs_ntfc" = "true" ]; then
+        export NTFC_CONTAINER="ntfc-${REPO_NAME}-${PR_ID}-${group}"
+        if ! bash "$CI_TOOLS/task_exec.sh" ntfc "$group"; then
+            group_failed=true
+        fi
+        bash "$CI_TOOLS/task_exec.sh" collect "$group" || true
+    fi
+
+    if [ "$group_failed" = true ]; then
+        log "ERROR" "group failed: $group"
+        FAILED_GROUPS="$FAILED_GROUPS $group"
+    else
+        PASSED=$((PASSED + 1))
+    fi
 done
 
-# --- Build all configs ---
-BUILD_FAILED=false
-TOTAL=0
-PASSED=0
-FAILED_TASKS=""
-
-while IFS= read -r task; do
-    [ -z "$task" ] && continue
-    TOTAL=$((TOTAL + 1))
-    log "INFO" "=== Building [$TOTAL]: $task ==="
-    if do_build "$task"; then
-        PASSED=$((PASSED + 1))
-    else
-        BUILD_FAILED=true
-        FAILED_TASKS="$FAILED_TASKS $task"
-        # Continue building other configs even if one fails
-    fi
-done <<< "$BUILD_TASKS"
-
-log "INFO" "Build summary: $PASSED/$TOTAL passed"
-if [ "$BUILD_FAILED" = true ]; then
-    log "ERROR" "Failed tasks:$FAILED_TASKS"
+log "INFO" "Group summary: $PASSED/$GROUP_COUNT passed"
+if [ -n "$FAILED_GROUPS" ]; then
+    log "ERROR" "Failed groups:$FAILED_GROUPS"
     set_comment "ci" "failed"
     echo "CI_RESULT=FAILURE"
     exit 2

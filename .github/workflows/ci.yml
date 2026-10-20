@@ -1,38 +1,71 @@
 # .github/workflows/ci.yml
-# Security: No Gitee credentials on GitHub side.
+#
+# Gitee PR CI. Triggered by the Jenkins gitee-ci-proxy job via
+# repository_dispatch; Jenkins owns every Gitee interaction, so there are no
+# Gitee credentials on the GitHub side.
+#
+# The task list is not maintained here. The parse job reads the matrix out of
+# the GitHub CI workflow in open-vela/public-actions and derives each group's
+# capabilities from the task flags, so tasks and groups added or removed
+# upstream are picked up on the next run. No group name is hard-coded below.
 name: Gitee CI/CT
 
 on:
   repository_dispatch:
     types: [gitee-pr-ci]
+  workflow_dispatch:
+    inputs:
+      pr_branch:
+        description: 'Target branch (selects the upstream CI workflow to mirror)'
+        type: string
+        default: trunk
+      upstream_ref:
+        description: 'public-actions ref to read the matrix from (default: same as pr_branch routing)'
+        type: string
+        default: ''
 
 permissions: {}
 
+env:
+  UPSTREAM_REPO: open-vela/public-actions
+
 jobs:
   # ============================================================
-  # Job 1: Parse payload + fetch matrix
+  # Job 1: read the upstream matrix and the pinned tool versions
   # ============================================================
   parse:
     runs-on: ubuntu-latest
     outputs:
-      org: ${{ steps.p.outputs.org }}
-      repo: ${{ steps.p.outputs.repo }}
-      pr_id: ${{ steps.p.outputs.pr_id }}
-      pr_branch: ${{ steps.p.outputs.pr_branch }}
-      manifest_url: ${{ steps.p.outputs.manifest_url }}
-      repo_http_url: ${{ steps.p.outputs.repo_http_url }}
-      all_pr: ${{ steps.p.outputs.all_pr }}
-      matrix: ${{ steps.p.outputs.matrix }}
+      org: ${{ steps.payload.outputs.org }}
+      repo: ${{ steps.payload.outputs.repo }}
+      pr_id: ${{ steps.payload.outputs.pr_id }}
+      pr_branch: ${{ steps.payload.outputs.pr_branch }}
+      manifest_url: ${{ steps.payload.outputs.manifest_url }}
+      all_pr: ${{ steps.payload.outputs.all_pr }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      pins: ${{ steps.matrix.outputs.pins }}
+      fingerprint: ${{ steps.matrix.outputs.fingerprint }}
     steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v5
+
       - name: Parse and validate payload
-        id: p
+        id: payload
         env:
           CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          INPUT_PR_BRANCH: ${{ inputs.pr_branch }}
         run: |
-          ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
-          REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
-          PR_ID=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_id // empty')
-          PR_BRANCH=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_branch // empty')
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual run: no Gitee PR, just exercise the build matrix.
+            echo "org=open-vela"                >> $GITHUB_OUTPUT
+            echo "repo=nuttx"                   >> $GITHUB_OUTPUT
+            echo "pr_id=0"                      >> $GITHUB_OUTPUT
+            echo "pr_branch=${INPUT_PR_BRANCH}" >> $GITHUB_OUTPUT
+            echo "manifest_url=https://gitee.com/open-vela/manifests" >> $GITHUB_OUTPUT
+            echo "all_pr="                      >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           for field in org repo pr_id pr_branch; do
             val=$(echo "$CLIENT_PAYLOAD" | jq -r ".$field // empty")
@@ -40,27 +73,28 @@ jobs:
               echo "::error::Missing required field: $field"
               exit 1
             fi
+            echo "$field=$val" >> $GITHUB_OUTPUT
           done
-
-          echo "org=$ORG" >> $GITHUB_OUTPUT
-          echo "repo=$REPO" >> $GITHUB_OUTPUT
-          echo "pr_id=$PR_ID" >> $GITHUB_OUTPUT
-          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
           echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
-          echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
 
-          # Parse depends-on
+          ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org')
+          REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo')
+          PR_ID=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_id')
+
+          # depends-on, validated one URL at a time; the manifest PR goes first
+          # because applying it changes what the other projects sync to.
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
-          DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          PR_LIST="$CURRENT_PR $DEPENDS"
+          DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null \
+                    | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          PR_LIST="https://gitee.com/$ORG/$REPO/pulls/$PR_ID $DEPENDS"
           PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
-
           ALL_PR=""
           for url in $PR_LIST; do
             if echo "$url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
               pair=$(echo "$url" | sed -n 's#https://gitee.com/\([^/]\+/[^/]\+\)/pulls/\([0-9]\+\)#\1:\2#p')
               [ -n "$pair" ] && ALL_PR="$ALL_PR $pair"
+            else
+              echo "::warning::ignoring invalid depends-on entry: $url"
             fi
           done
           manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
@@ -68,56 +102,62 @@ jobs:
             rest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
             ALL_PR="$manifest_part $rest"
           fi
-          ALL_PR=$(echo $ALL_PR | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          echo "all_pr=$(echo $ALL_PR | xargs)" >> $GITHUB_OUTPUT
 
-          # Fetch build matrix from public-actions
-          if [ "$PR_BRANCH" = "dev" ]; then
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
-          else
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
+      - name: Derive matrix from upstream GitHub CI
+        id: matrix
+        env:
+          PR_BRANCH: ${{ steps.payload.outputs.pr_branch }}
+          UPSTREAM_REF_OVERRIDE: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+
+          # Same routing public-actions/ci.yml applies to GitHub PRs: exactly
+          # "dev" uses ci-real.yml, "dev-*" uses the trunk-5.5 variant, and
+          # everything else uses trunk's ci.yml.
+          ref="${UPSTREAM_REF_OVERRIDE:-}"
+          case "${PR_BRANCH}" in
+            dev)    path='.github/workflows/ci-real.yml';              ref="${ref:-dev}" ;;
+            dev-*)  path='.github/workflows/ci-real_trunk-5.5.yml';    ref="${ref:-dev}" ;;
+            *)      path='.github/workflows/ci.yml';                   ref="${ref:-trunk}" ;;
+          esac
+
+          url="https://raw.githubusercontent.com/${UPSTREAM_REPO}/${ref}/${path}"
+          echo "Upstream CI: $url"
+          if ! curl -fsSL "$url" -o /tmp/upstream-ci.yml; then
+            echo "::error::cannot fetch the upstream CI workflow: $url"
+            exit 1
           fi
-          echo "Fetching matrix from: $CI_URL" >&2
-          CI_YAML=$(curl -s "$CI_URL")
-          MATRIX=$(echo "$CI_YAML" | python3 -c "
-          import sys, re, json
-          content = sys.stdin.read()
-          groups = []
-          current_group = None
-          current_tasks = []
-          in_tasks = False
-          for line in content.split('\n'):
-              s = line.strip()
-              if '- group:' in s:
-                  if current_group and current_tasks:
-                      groups.append({'group': current_group, 'tasks': current_tasks})
-                  current_group = s.split('- group:')[1].strip().split('#')[0].strip()
-                  current_tasks = []
-                  in_tasks = False
-              elif 'tasks:' in s and current_group:
-                  in_tasks = True
-                  m = re.search(r'tasks:\s*\[([^\]]+)\]', s)
-                  if m:
-                      for t in m.group(1).split(','):
-                          t = t.strip().strip('\"').strip(\"'\")
-                          if t: current_tasks.append(t)
-                      in_tasks = False
-              elif in_tasks and s.startswith('- '):
-                  t = s[2:].strip().strip('\"').strip(\"'\")
-                  if t and not t.startswith('#'):
-                      current_tasks.append(t)
-              elif in_tasks and s and not s.startswith('#') and not s.startswith('-'):
-                  in_tasks = False
-          if current_group and current_tasks:
-              groups.append({'group': current_group, 'tasks': current_tasks})
-          print(json.dumps({'include': groups}))
-          ")
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Matrix: $MATRIX" >&2
+
+          python3 tools/ci/ci_matrix.py --workflow /tmp/upstream-ci.yml --format report
+          matrix=$(python3 tools/ci/ci_matrix.py --workflow /tmp/upstream-ci.yml --format matrix)
+          python3 tools/ci/ci_matrix.py --workflow /tmp/upstream-ci.yml --format env > /tmp/pins.env
+
+          # The matrix and the pins have to come from the same upstream content,
+          # otherwise a new task could run against stale versions.
+          fp=$(sed -n 's/^CI_UPSTREAM_FINGERPRINT=//p' /tmp/pins.env)
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          echo "fingerprint=$fp" >> $GITHUB_OUTPUT
+          {
+            echo 'pins<<PINS_EOF'
+            grep -v '^CI_UPSTREAM_FINGERPRINT=' /tmp/pins.env
+            echo 'PINS_EOF'
+          } >> $GITHUB_OUTPUT
+
+          {
+            echo "### Gitee CI matrix"
+            echo
+            echo "- upstream: \`${UPSTREAM_REPO}@${ref}\` \`${path}\`"
+            echo "- fingerprint: \`sha256:${fp}\`"
+            echo
+            echo '```'
+            python3 tools/ci/ci_matrix.py --workflow /tmp/upstream-ci.yml --format report
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
 
   # ============================================================
-  # Job 2: Setup - repo sync, record PR info, generate snapshot
-  #         (NO cherry-pick here - done in each ci-tasks group)
+  # Job 2: one sync, one snapshot, shared by every group
   # ============================================================
   setup:
     needs: parse
@@ -132,7 +172,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq
-          sudo curl -s -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+          sudo curl -fsSL -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
           sudo chmod a+x /usr/local/bin/repo
 
       - name: Clean up disk space
@@ -147,7 +187,9 @@ jobs:
           PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
         run: |
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
+          set -euo pipefail
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml \
+            --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
 
       - name: Generate snapshot and PR info
@@ -158,22 +200,17 @@ jobs:
           REPO: ${{ needs.parse.outputs.repo }}
           PR_ID: ${{ needs.parse.outputs.pr_id }}
         run: |
+          set -euo pipefail
           SNAPSHOT_NAME="snapshot_${ORG}_${REPO}_${PR_ID}"
           PR_INFO_FILE="pr_info_${ORG}_${REPO}_${PR_ID}"
-
-          # Generate snapshot (frozen manifest with exact commit SHAs)
           repo manifest -r -o "$SNAPSHOT_NAME"
+          touch "$PR_INFO_FILE"
 
-          # Record PR commit info for each dependency
-          # Format: repo_name:commit_sha (one per line)
           for PR_INFO in $ALL_PR; do
             REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
             PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
             PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
-
-            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
-              continue
-            fi
+            if [ "$PR_NUMBER" = "0" ] || [ -z "$PR_NUMBER" ]; then continue; fi
 
             if [ "$PROJECT_NAME" = "manifests" ]; then
               cd .repo/manifests
@@ -183,7 +220,7 @@ jobs:
             else
               REPO_PATH=$(grep "\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | awk -F'"' '{print $2}')
               if [ -z "$REPO_PATH" ]; then
-                echo "WARNING: Could not find path for $PROJECT_NAME"
+                echo "::warning::no manifest path for $PROJECT_NAME"
                 continue
               fi
               cd "$REPO_PATH"
@@ -194,12 +231,7 @@ jobs:
             echo "${REPO_FULL_PATH}:${PR_NUMBER}:${LATEST_SHA}" >> "$PR_INFO_FILE"
             echo "Recorded: ${REPO_FULL_PATH} PR#${PR_NUMBER} SHA=${LATEST_SHA}"
           done
-
-          # Create empty PR_INFO_FILE if no PRs
-          touch "$PR_INFO_FILE"
-
           echo "name=$SNAPSHOT_NAME" >> $GITHUB_OUTPUT
-          echo "pr_info=$PR_INFO_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload snapshot and PR info
         uses: actions/upload-artifact@v4
@@ -210,17 +242,40 @@ jobs:
             pr_info_*
 
   # ============================================================
-  # Job 3: CI tasks - parallel by group, cherry-pick + Docker build
+  # Job 3: one job per upstream group
+  #
+  # Everything that varies per group comes from the derived matrix:
+  # matrix.tasks, matrix.ntfc, matrix.job_minutes, matrix.step_minutes.
   # ============================================================
   ci-tasks:
     needs: [parse, setup]
     runs-on: ubuntu-latest
+    # matrix is available in a job-level timeout expression, so each group gets
+    # the bound derived from its own tasks: build-only groups keep GitHub's 360
+    # default, a group with one NTFC task gets 180.
+    timeout-minutes: ${{ matrix.job_minutes }}
     strategy:
       matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
       fail-fast: false
-    outputs:
-      status: ${{ steps.check.outputs.status }}
     steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v5
+        with:
+          path: .ci-runner
+
+      - name: Show resolved task plan
+        env:
+          CI_TASKS: ${{ join(matrix.tasks, ' ') }}
+          CI_NTFC: ${{ matrix.ntfc }}
+          CI_NTFC_TASKS: ${{ join(matrix.ntfc_tasks, ' ') }}
+        run: |
+          echo "group        : ${{ matrix.group }}"
+          echo "tasks        : ${CI_TASKS}"
+          echo "ntfc         : ${CI_NTFC}  (${CI_NTFC_TASKS:-none})"
+          echo "job timeout  : ${{ matrix.job_minutes }} min"
+          echo "step timeout : ${{ matrix.step_minutes }} min"
+          echo "upstream     : sha256:${{ needs.parse.outputs.fingerprint }}"
+
       - name: Download snapshot and PR info
         uses: actions/download-artifact@v4
         with:
@@ -239,8 +294,8 @@ jobs:
 
       - name: Install repo
         run: |
-          mkdir ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
@@ -250,28 +305,16 @@ jobs:
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
           SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
         run: |
-          # Save snapshot and pr_info before repo init overwrites workspace
+          set -euo pipefail
+          # repo init rewrites the workspace, so keep the inputs elsewhere.
           cp "$SNAPSHOT_FILE" /tmp/ 2>/dev/null || true
           cp pr_info_* /tmp/ 2>/dev/null || true
-
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
-
-          # Copy snapshot into manifests and re-init with it
+          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml \
+            --group=default,platform-linux --depth=1 --git-lfs
           cp "/tmp/$SNAPSHOT_FILE" .repo/manifests/
-          echo "Re-init with snapshot: $SNAPSHOT_FILE"
           repo init -m "$SNAPSHOT_FILE" --group=default,platform-linux --depth=1 --git-lfs
-
-          # Verify snapshot is active
-          ACTIVE_MANIFEST=$(readlink -f .repo/manifest.xml 2>/dev/null || echo "unknown")
-          echo "Active manifest: $ACTIVE_MANIFEST"
-          echo "Snapshot file exists in manifests: $(ls -la .repo/manifests/$SNAPSHOT_FILE 2>/dev/null || echo 'NOT FOUND')"
-          echo "First 3 projects in active manifest:"
-          head -20 .repo/manifest.xml 2>/dev/null | grep '<project' | head -3
-
+          echo "Active manifest: $(readlink -f .repo/manifest.xml || echo unknown)"
           repo sync -c -d --no-tags --force-sync -j$(nproc)
-
-          # Restore pr_info for cherry-pick step
-          cp /tmp/pr_info_* . 2>/dev/null || true
           df -h
 
       - name: Cherry-pick PRs
@@ -279,31 +322,24 @@ jobs:
           ALL_PR: ${{ needs.parse.outputs.all_pr }}
           SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
         run: |
+          set -euo pipefail
           git config --global user.email "openvela-robot@xiaomi.com"
           git config --global user.name "openvela-robot"
-
-          PR_INFO_FILE=$(ls pr_info_* 2>/dev/null | head -1)
-          if [ -z "$PR_INFO_FILE" ] || [ ! -s "$PR_INFO_FILE" ]; then
+          PR_INFO_FILE=$(ls /tmp/pr_info_* 2>/dev/null | head -1 || true)
+          if [ -z "${ALL_PR}" ] || [ -z "$PR_INFO_FILE" ] || [ ! -s "$PR_INFO_FILE" ]; then
             echo "No PRs to cherry-pick"
             exit 0
           fi
-
           for PR_INFO in $ALL_PR; do
             REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
             PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
             PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
-
-            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
-              continue
-            fi
-
-            # Get commit SHA from PR info file
+            [ "$PR_NUMBER" = "0" ] && continue
             PR_COMMIT=$(grep "^${REPO_FULL_PATH}:" "$PR_INFO_FILE" | awk -F':' '{print $3}')
             if [ -z "$PR_COMMIT" ]; then
-              echo "WARNING: No commit info for $REPO_FULL_PATH, skipping"
-              continue
+              echo "::error::no recorded commit for $REPO_FULL_PATH; setup and build disagree"
+              exit 1
             fi
-
             if [ "$PROJECT_NAME" = "manifests" ]; then
               cd .repo/manifests
               git fetch origin "pull/$PR_NUMBER/head:pr-branch"
@@ -311,15 +347,16 @@ jobs:
               cd -
               repo sync -c -d --no-tags --force-sync -j$(nproc)
             else
-              REPO_NAME=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
               REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'path="' '{print $2}' | awk -F'"' '{print $1}')
-              [ -z "$REPO_PATH" ] && REPO_PATH="$REPO_NAME"
               if [ -z "$REPO_PATH" ]; then
-                echo "WARNING: Could not find path for $PROJECT_NAME"
-                continue
+                REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
+              fi
+              if [ -z "$REPO_PATH" ]; then
+                echo "::error::no manifest path for $PROJECT_NAME"
+                exit 1
               fi
               cd "$REPO_PATH"
-              git fetch openvela "pull/$PR_NUMBER/head:pr-branch"
+              git fetch "https://gitee.com/$REPO_FULL_PATH.git" "pull/$PR_NUMBER/head:pr-branch"
               git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
               cd -
             fi
@@ -332,8 +369,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Load upstream pins
+        env:
+          PINS: ${{ needs.parse.outputs.pins }}
+        run: |
+          set -euo pipefail
+          # KEY=VALUE lines produced by ci_matrix.py --format env, so the image
+          # and the NTFC versions follow upstream without being restated here.
+          printf '%s\n' "$PINS" | grep -E '^CI_[A-Z_]+=' >> $GITHUB_ENV
+          printf '%s\n' "$PINS"
+
       - name: Docker Pull
-        run: docker pull ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx
+        run: |
+          docker pull "${CI_DOCKER_IMAGE}"
+          df -h
 
       - name: Clean up after Docker pull
         run: |
@@ -342,42 +391,63 @@ jobs:
           sudo docker builder prune -a 2>/dev/null || true
           df -h
 
-      - name: Run CI tasks in Docker
+      - name: Build tasks
         env:
-          CI_MATRIX_GROUP: ${{ matrix.group }}
+          CI_WORKSPACE: ${{ github.workspace }}
+          CI_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
+          CI_PR_NUMBER: ${{ needs.parse.outputs.pr_id }}
+          CI_TASKS: ${{ join(matrix.tasks, ' ') }}
         run: |
-          WORKSPACE=$(pwd)
-          for task in ${{ join(matrix.tasks, ' ') }}; do
-            echo "=== Building: $task ==="
-            cmake_flag=""
-            cp_base_dir="nuttx"
-            if [[ "$task" == *@* ]]; then
-              cmake_flag="--cmake"
-              task_name=$(echo "$task" | awk -F '@' '{print $1}')
-              cp_base_dir="cmake_out/*"
-            else
-              task_name="$task"
-            fi
+          set -euo pipefail
+          bash .ci-runner/tools/ci/task_exec.sh build "${{ matrix.group }}" ${CI_TASKS}
 
-            if [[ "$task_name" == *:* ]] || [[ "$task_name" == *vendor/* ]] || [[ "$task_name" == ./* ]]; then
-              build_cmd="./build.sh $task_name $cmake_flag -e -Werror -j$(nproc)"
-            else
-              build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task_name $cmake_flag -e -Werror -j$(nproc)"
-            fi
+      # Own step with its own bound: a step timeout is an ordinary step failure,
+      # so the collector and the upload below stay reachable. A job timeout is
+      # reported as cancelled, under which neither would run.
+      - name: Run NTFC runtime tests
+        if: ${{ matrix.ntfc == 'true' }}
+        timeout-minutes: ${{ matrix.step_minutes }}
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          bash .ci-runner/tools/ci/task_exec.sh ntfc "${{ matrix.group }}"
 
-            echo "Build command: $build_cmd"
-            docker run --rm \
-              -v "${WORKSPACE}":/workspace \
-              -w /workspace \
-              ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest \
-              /bin/bash -c "df -h && $build_cmd && ls -atl nuttx"
+      - name: Collect NTFC diagnostics
+        if: ${{ always() && matrix.ntfc == 'true' }}
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          bash .ci-runner/tools/ci/task_exec.sh collect "${{ matrix.group }}" || true
 
-            echo "=== Cleaning up after $task ==="
-            sudo ~/bin/repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
-            sudo rm -rf cmake_out || true
-          done
+      # Build-only groups upload on success. The NTFC groups also upload on an
+      # ordinary failure, which is exactly when their console captures matter.
+      - name: Archive CI Build Package
+        if: ${{ success() || (!cancelled() && matrix.ntfc == 'true') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build_Package_${{ matrix.group }}
+          path: ${{ matrix.group }}
+          if-no-files-found: warn
 
-      - name: Check status
-        id: check
-        if: always()
-        run: echo "status=${{ job.status }}" >> $GITHUB_OUTPUT
+  # ============================================================
+  # Job 4: single aggregated status for Jenkins to read
+  # ============================================================
+  result:
+    needs: [parse, ci-tasks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate
+        env:
+          CI_TASKS_STATUS: ${{ needs.ci-tasks.result }}
+        run: |
+          echo "upstream matrix: sha256:${{ needs.parse.outputs.fingerprint }}"
+          echo "ci-tasks result: ${CI_TASKS_STATUS}"
+          if [ "${CI_TASKS_STATUS}" != "success" ]; then
+            echo "::error::CI failed: ci-tasks = ${CI_TASKS_STATUS}"
+            exit 1
+          fi
+          echo "CI_RESULT=SUCCESS"
