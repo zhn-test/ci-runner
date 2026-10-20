@@ -108,28 +108,25 @@ do_clean_pr_branch() {
 # is exactly one implementation of "what a task means".
 CI_TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")/tools/ci" && pwd)"
 
-upstream_ci_path() {
-    case "${1:-trunk}" in
-        dev)   echo ".github/workflows/ci-real.yml" ;;
-        dev-*) echo ".github/workflows/ci-real_trunk-5.5.yml" ;;
-        *)     echo ".github/workflows/ci.yml" ;;
-    esac
-}
-
-upstream_ci_ref() {
-    case "${1:-trunk}" in
-        dev|dev-*) echo "dev" ;;
-        *)         echo "trunk" ;;
-    esac
-}
+# Which upstream workflow serves this PR's target branch is decided by the
+# dispatcher every openvela PR goes through, so it is read rather than guessed:
+# a new branch family upstream needs no change here.
+DISPATCHER_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci.yml"
 
 # Downloads the upstream workflow for the PR's target branch into $1.
 fetch_upstream_ci() {
-    local dest=$1 branch=$2 path ref url
-    path=$(upstream_ci_path "$branch")
-    ref=$(upstream_ci_ref "$branch")
-    url="https://raw.githubusercontent.com/open-vela/public-actions/${ref}/${path}"
-    log "INFO" "Upstream CI: $url" >&2
+    local dest=$1 branch=$2 disp url
+    disp="$(dirname "$dest")/.dispatcher.yml"
+    curl -fsSL "$DISPATCHER_URL" -o "$disp" || return 1
+    if ! python3 "$CI_TOOLS/ci_matrix.py" --dispatcher "$disp" \
+            --resolve-branch "$branch" --format route > "$disp.route"; then
+        return 1
+    fi
+    cat "$disp.route" >&2
+    # shellcheck disable=SC1090
+    . "$disp.route"
+    url="https://raw.githubusercontent.com/open-vela/public-actions/${CI_UPSTREAM_REF}/${CI_UPSTREAM_PATH}"
+    log "INFO" "Upstream CI: $url (via ${CI_UPSTREAM_VIA})" >&2
     curl -fsSL "$url" -o "$dest"
 }
 

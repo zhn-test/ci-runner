@@ -131,6 +131,80 @@ class Pins:
 
 
 @dataclass
+class Route:
+    """Which upstream workflow serves a given PR target branch."""
+
+    ref: str
+    path: str
+    via: str
+
+    def as_env(self) -> dict[str, str]:
+        return {
+            "CI_UPSTREAM_REF": self.ref,
+            "CI_UPSTREAM_PATH": self.path,
+            "CI_UPSTREAM_VIA": self.via,
+        }
+
+
+# The dispatcher every openvela PR goes through:
+# nuttx/ci.yml -> public-actions/ci.yml@dev -> the per-branch CI workflow.
+BASE_REF_EQ = re.compile(r"base\.ref\s*==\s*'([^']+)'")
+BASE_REF_PREFIX = re.compile(
+    r"startsWith\(\s*github\.event\.pull_request\.base\.ref\s*,\s*'([^']+)'\s*\)"
+)
+USES_UPSTREAM = re.compile(
+    r"open-vela/public-actions/(\.github/workflows/[\w.\-]+\.ya?ml)@([\w.\-/]+)"
+)
+
+
+def resolve_route(dispatcher: Path, branch: str) -> Route:
+    """Read the branch -> workflow mapping out of the dispatcher workflow.
+
+    Hard-coding the mapping here is what makes a Gitee run diverge from GitHub
+    CI when upstream adds a branch family, so it is read instead.
+    """
+    doc = load_workflow(dispatcher)
+    exact: dict[str, Route] = {}
+    prefixes: list[tuple[str, Route]] = []
+
+    for job_name, job in (doc.get("jobs") or {}).items():
+        uses = job.get("uses")
+        cond = job.get("if")
+        if not isinstance(uses, str) or not isinstance(cond, str):
+            continue
+        m = USES_UPSTREAM.search(uses)
+        if not m:
+            continue
+        path, ref = m.group(1), m.group(2)
+        # cla.yml carries no build matrix; it is not a CI route.
+        if "cla" in path:
+            continue
+        route = Route(ref=ref, path=path, via=job_name)
+        for literal in BASE_REF_EQ.findall(cond):
+            exact.setdefault(literal, route)
+        for prefix in BASE_REF_PREFIX.findall(cond):
+            prefixes.append((prefix, route))
+
+    if not exact and not prefixes:
+        raise Drift(
+            f"{dispatcher}: found no 'base.ref' conditioned job that calls a "
+            "public-actions workflow; the dispatcher was restructured"
+        )
+
+    if branch in exact:
+        return exact[branch]
+    # Longest prefix wins, so 'dev-' beats a hypothetical 'd'.
+    for prefix, route in sorted(prefixes, key=lambda p: len(p[0]), reverse=True):
+        if branch.startswith(prefix):
+            return route
+    raise Drift(
+        f"{dispatcher}: no route for target branch {branch!r}. "
+        f"Exact: {sorted(exact)}; prefixes: {sorted(p for p, _ in prefixes)}. "
+        "GitHub CI would run nothing for this branch, so neither will Gitee."
+    )
+
+
+@dataclass
 class Extraction:
     groups: list[Group]
     pins: Pins
@@ -449,7 +523,13 @@ def as_report(ex: Extraction) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--workflow", required=True, type=Path)
+    ap.add_argument("--workflow", type=Path, help="upstream CI workflow to read the matrix from")
+    ap.add_argument(
+        "--dispatcher",
+        type=Path,
+        help="public-actions ci.yml, read to resolve a branch to its CI workflow",
+    )
+    ap.add_argument("--resolve-branch", help="PR target branch to resolve with --dispatcher")
     ap.add_argument(
         "--quirks",
         type=Path,
@@ -458,10 +538,30 @@ def main() -> int:
     )
     ap.add_argument(
         "--format",
-        choices=("matrix", "env", "report"),
+        choices=("matrix", "env", "report", "route"),
         default="matrix",
     )
     args = ap.parse_args()
+
+    if args.format == "route" or args.dispatcher:
+        if not args.dispatcher or not args.resolve_branch:
+            print(
+                "::error::--format route needs both --dispatcher and --resolve-branch",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            route = resolve_route(args.dispatcher, args.resolve_branch)
+        except Drift as exc:
+            print(f"::error::upstream CI drift: {exc}", file=sys.stderr)
+            return 1
+        for key, value in route.as_env().items():
+            print(f"{key}={value}")
+        return 0
+
+    if not args.workflow:
+        print("::error::--workflow is required", file=sys.stderr)
+        return 2
 
     try:
         ex = extract(args.workflow, args.quirks)

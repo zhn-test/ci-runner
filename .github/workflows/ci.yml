@@ -113,18 +113,21 @@ jobs:
           set -euo pipefail
           python3 -m pip install --quiet --disable-pip-version-check pyyaml
 
-          # Same routing public-actions/ci.yml applies to GitHub PRs: exactly
-          # "dev" uses ci-real.yml, "dev-*" uses the trunk-5.5 variant, and
-          # everything else uses trunk's ci.yml.
-          ref="${UPSTREAM_REF_OVERRIDE:-}"
-          case "${PR_BRANCH}" in
-            dev)    path='.github/workflows/ci-real.yml';              ref="${ref:-dev}" ;;
-            dev-*)  path='.github/workflows/ci-real_trunk-5.5.yml';    ref="${ref:-dev}" ;;
-            *)      path='.github/workflows/ci.yml';                   ref="${ref:-trunk}" ;;
-          esac
+          # Which upstream workflow serves this target branch is decided by the
+          # dispatcher every openvela PR goes through, so it is read rather
+          # than restated here: a new branch family upstream needs no change.
+          disp="https://raw.githubusercontent.com/${UPSTREAM_REPO}/dev/.github/workflows/ci.yml"
+          curl -fsSL "$disp" -o /tmp/dispatcher.yml
+          python3 tools/ci/ci_matrix.py --dispatcher /tmp/dispatcher.yml \
+            --resolve-branch "${PR_BRANCH}" --format route > /tmp/route.env
+          cat /tmp/route.env
+          # shellcheck disable=SC1091
+          . /tmp/route.env
+          ref="${UPSTREAM_REF_OVERRIDE:-$CI_UPSTREAM_REF}"
+          path="${CI_UPSTREAM_PATH}"
 
           url="https://raw.githubusercontent.com/${UPSTREAM_REPO}/${ref}/${path}"
-          echo "Upstream CI: $url"
+          echo "Upstream CI: $url (route via ${CI_UPSTREAM_VIA})"
           if ! curl -fsSL "$url" -o /tmp/upstream-ci.yml; then
             echo "::error::cannot fetch the upstream CI workflow: $url"
             exit 1
@@ -148,7 +151,8 @@ jobs:
           {
             echo "### Gitee CI matrix"
             echo
-            echo "- upstream: \`${UPSTREAM_REPO}@${ref}\` \`${path}\`"
+            echo "- target branch: \`${PR_BRANCH}\`"
+            echo "- upstream: \`${UPSTREAM_REPO}@${ref}\` \`${path}\` (via \`${CI_UPSTREAM_VIA}\`)"
             echo "- fingerprint: \`sha256:${fp}\`"
             echo
             echo '```'

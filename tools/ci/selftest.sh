@@ -242,6 +242,36 @@ if [ -f "$UPSTREAM_DIR/pa-dev-ci-real.yml" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+head2 "3b. branch routing is read from the dispatcher"
+DISP="$UPSTREAM_DIR/pa-dev-ci.yml"
+if [ -f "$DISP" ]; then
+  route() { $MATRIX --dispatcher "$DISP" --resolve-branch "$1" --format route 2>&1; }
+  check_route() {
+    out=$(route "$1")
+    if printf '%s' "$out" | grep -q "CI_UPSTREAM_PATH=.github/workflows/$2" &&
+       printf '%s' "$out" | grep -q "CI_UPSTREAM_REF=$3"; then
+      ok "$1 -> $2@$3"
+    else
+      bad "$1 -> expected $2@$3, got: $(printf '%s' "$out" | tr '\n' ' ')"
+    fi
+  }
+  check_route trunk               ci.yml                   trunk
+  check_route rebase_dev_trunk_55 ci.yml                   trunk
+  check_route dev                 ci-real.yml              dev
+  check_route dev-ai-contest-2026 ci-real_trunk-5.5.yml    dev
+  # Captured rather than piped: pipefail would see the intended non-zero exit
+  # of the left-hand side and fail the pipeline.
+  out=$(route release-nonexistent)
+  if printf '%s' "$out" | grep -q 'no route for target branch'; then
+    ok "unknown branch rejected"
+  else
+    bad "unknown branch should be rejected"
+  fi
+else
+  bad "dispatcher $DISP missing (skipped)"
+fi
+
+# ---------------------------------------------------------------------------
 head2 "4. flag parsing in the executor"
 cat > "$TMP/flags.sh" <<'SH'
 TASK_NAME=""; TASK_FLAGS=""

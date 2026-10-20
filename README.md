@@ -10,11 +10,20 @@ Build tasks are read at run time out of the GitHub CI workflow in
 `open-vela/public-actions`, so a task or a whole group added or removed there is
 picked up on the next Gitee run with no change in this repository.
 
-| PR target branch | upstream workflow mirrored |
-|---|---|
-| `dev` | `public-actions@dev` `.github/workflows/ci-real.yml` |
-| `dev-*` | `public-actions@dev` `.github/workflows/ci-real_trunk-5.5.yml` |
-| anything else | `public-actions@trunk` `.github/workflows/ci.yml` |
+Which upstream workflow serves a given PR is not hard-coded either: the
+dispatcher every openvela PR goes through
+(`public-actions@dev/.github/workflows/ci.yml`) is read to resolve it, so a new
+branch family upstream needs no change here. At the time of writing it resolves
+to:
+
+| PR target branch | upstream workflow mirrored | dispatcher job |
+|---|---|---|
+| `trunk`, `rebase_dev_trunk*` | `public-actions@trunk` `ci.yml` | `ci_trunk` |
+| `dev` | `public-actions@dev` `ci-real.yml` | `ci_dev` |
+| `dev-*` | `public-actions@dev` `ci-real_trunk-5.5.yml` | `ci_dev_derived` |
+
+A branch the dispatcher has no job for fails the run: GitHub CI would build
+nothing for it, so neither does Gitee.
 
 ## What a task means
 
