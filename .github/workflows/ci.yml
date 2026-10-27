@@ -161,6 +161,13 @@ jobs:
           sudo docker image prune --all --force 2>/dev/null || true
           df -h
 
+      # PROBE ONLY: the Gitee mirror of this project lacks its LFS objects
+      # (batch API returns 404); fetch the same commit from GitHub instead.
+      - name: "PROBE: work around missing Gitee LFS objects"
+        run: |
+          git config --global url."https://github.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf".insteadOf \
+            "https://gitee.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf"
+
       - name: Repo Init and Sync
         env:
           PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
@@ -278,6 +285,13 @@ jobs:
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
+
+      # PROBE ONLY: the Gitee mirror of this project lacks its LFS objects
+      # (batch API returns 404); fetch the same commit from GitHub instead.
+      - name: "PROBE: work around missing Gitee LFS objects"
+        run: |
+          git config --global url."https://github.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf".insteadOf \
+            "https://gitee.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf"
 
       - name: Repo Init and Sync from snapshot
         env:
