@@ -33,7 +33,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: '{"org":"open-vela","repo":"nuttx","pr_id":"10","pr_branch":"dev","manifest_url":"https://gitee.com/open-vela/manifests.git","repo_http_url":"https://gitee.com/open-vela/nuttx.git","pr_description":""}'
+          CLIENT_PAYLOAD: '{"org":"open-vela","repo":"nuttx","pr_id":"0","pr_branch":"dev","manifest_url":"https://gitee.com/open-vela/manifests.git","repo_http_url":"https://gitee.com/open-vela/nuttx.git","pr_description":""}'
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
