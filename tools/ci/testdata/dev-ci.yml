@@ -1,0 +1,34 @@
+name: CI
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+  workflow_call:
+
+jobs:
+  cla:
+    # Run automatically for PRs, or when /check-cla is posted.
+    if: github.event_name == 'pull_request_target' || github.event_name == 'workflow_call' || (github.event.issue.pull_request && contains(github.event.comment.body, '/check-cla'))
+    uses: open-vela/public-actions/.github/workflows/cla.yml@dev
+    secrets: inherit
+
+  ci_trunk:
+    # Run for PRs only; comments do not trigger CI.
+    if: (github.event_name == 'pull_request_target' || github.event_name == 'workflow_call') && (github.event.pull_request.base.ref == 'trunk' || startsWith(github.event.pull_request.base.ref, 'rebase_dev_trunk'))
+    uses: open-vela/public-actions/.github/workflows/ci.yml@trunk
+    secrets: inherit
+
+  ci_dev:
+    # Run only for PRs targeting dev; comments do not trigger CI.
+    if: (github.event_name == 'pull_request_target' || github.event_name == 'workflow_call') && github.event.pull_request.base.ref == 'dev'
+    uses: open-vela/public-actions/.github/workflows/ci-real.yml@dev
+    secrets: inherit
+
+  ci_dev_derived:
+    # Use the trunk-5.5 CI workflow for branches derived from dev. Reported as
+    # ci_dev so the check contexts stay the ones rulesets require.
+    name: ci_dev
+    if: (github.event_name == 'pull_request_target' || github.event_name == 'workflow_call') && startsWith(github.event.pull_request.base.ref, 'dev-')
+    uses: open-vela/public-actions/.github/workflows/ci-real_trunk-5.5.yml@dev
+    secrets: inherit

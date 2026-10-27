@@ -2,18 +2,21 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
+# PROBE ONLY: push-triggered copy for verification, with a fixed Gitee payload.
 on:
-  repository_dispatch:
-    types: [gitee-pr-ci]
+  push:
+    branches: [ci/upstream-step-exec-probe]
+  workflow_dispatch: {}
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   # ============================================================
   # Job 1: Parse payload + fetch matrix
   # ============================================================
   parse:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       org: ${{ steps.p.outputs.org }}
       repo: ${{ steps.p.outputs.repo }}
@@ -22,12 +25,15 @@ jobs:
       manifest_url: ${{ steps.p.outputs.manifest_url }}
       repo_http_url: ${{ steps.p.outputs.repo_http_url }}
       all_pr: ${{ steps.p.outputs.all_pr }}
-      matrix: ${{ steps.p.outputs.matrix }}
+      matrix: ${{ steps.u.outputs.matrix }}
+      runs_on: ${{ steps.u.outputs.runs_on }}
+      upstream_url: ${{ steps.u.outputs.url }}
+      upstream_sha256: ${{ steps.u.outputs.sha256 }}
     steps:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          CLIENT_PAYLOAD: '{"org":"open-vela","repo":"nuttx","pr_id":"10","pr_branch":"dev","manifest_url":"https://gitee.com/open-vela/manifests.git","repo_http_url":"https://gitee.com/open-vela/nuttx.git","pr_description":""}'
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
@@ -71,57 +77,66 @@ jobs:
           ALL_PR=$(echo $ALL_PR | xargs)
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
 
-          # Fetch build matrix from public-actions
-          if [ "$PR_BRANCH" = "dev" ]; then
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
-          else
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
-          fi
-          echo "Fetching matrix from: $CI_URL" >&2
-          CI_YAML=$(curl -s "$CI_URL")
-          MATRIX=$(echo "$CI_YAML" | python3 -c "
-          import sys, re, json
-          content = sys.stdin.read()
-          groups = []
-          current_group = None
-          current_tasks = []
-          in_tasks = False
-          for line in content.split('\n'):
-              s = line.strip()
-              if '- group:' in s:
-                  if current_group and current_tasks:
-                      groups.append({'group': current_group, 'tasks': current_tasks})
-                  current_group = s.split('- group:')[1].strip().split('#')[0].strip()
-                  current_tasks = []
-                  in_tasks = False
-              elif 'tasks:' in s and current_group:
-                  in_tasks = True
-                  m = re.search(r'tasks:\s*\[([^\]]+)\]', s)
-                  if m:
-                      for t in m.group(1).split(','):
-                          t = t.strip().strip('\"').strip(\"'\")
-                          if t: current_tasks.append(t)
-                      in_tasks = False
-              elif in_tasks and s.startswith('- '):
-                  t = s[2:].strip().strip('\"').strip(\"'\")
-                  if t and not t.startswith('#'):
-                      current_tasks.append(t)
-              elif in_tasks and s and not s.startswith('#') and not s.startswith('-'):
-                  in_tasks = False
-          if current_group and current_tasks:
-              groups.append({'group': current_group, 'tasks': current_tasks})
-          print(json.dumps({'include': groups}))
-          ")
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Matrix: $MATRIX" >&2
+      # Gitee CI keeps no task list and no build logic of its own. It runs the
+      # GitHub CI of open-vela/public-actions, pinned to one commit for the
+      # whole run, so whatever upstream adds, removes or changes in ci-tasks is
+      # followed without an edit here. tools/ci/upstream_ci.py fails this step,
+      # before any build starts, if upstream changed in a way it cannot follow.
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream GitHub CI
+        id: u
+        env:
+          PR_BRANCH: ${{ steps.p.outputs.pr_branch }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          repo=https://github.com/open-vela/public-actions
+          raw=https://raw.githubusercontent.com/open-vela/public-actions
+          sha_of() { git ls-remote "$repo.git" "refs/heads/$1" | cut -f1; }
+
+          # Every openvela PR goes through public-actions/ci.yml@dev, which
+          # picks the CI workflow by target branch; read it rather than guess.
+          dev_sha=$(sha_of dev)
+          [ -n "$dev_sha" ] || { echo "::error::cannot resolve public-actions dev"; exit 1; }
+          curl -fsSL "$raw/$dev_sha/.github/workflows/ci.yml" -o "$RUNNER_TEMP/dispatcher.yml"
+          python3 tools/ci/upstream_ci.py route --dispatcher "$RUNNER_TEMP/dispatcher.yml" \
+            --branch "$PR_BRANCH" | tee "$RUNNER_TEMP/route.env"
+          . "$RUNNER_TEMP/route.env"
+
+          sha=$dev_sha
+          [ "$CI_UPSTREAM_REF" = dev ] || sha=$(sha_of "$CI_UPSTREAM_REF")
+          [ -n "$sha" ] || { echo "::error::cannot resolve public-actions $CI_UPSTREAM_REF"; exit 1; }
+          url="$raw/$sha/$CI_UPSTREAM_PATH"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/upstream-ci.yml"
+
+          python3 tools/ci/upstream_ci.py check --workflow "$RUNNER_TEMP/upstream-ci.yml" | tee "$RUNNER_TEMP/plan.txt"
+          matrix=$(python3 tools/ci/upstream_ci.py matrix --workflow "$RUNNER_TEMP/upstream-ci.yml")
+          python3 tools/ci/upstream_ci.py info --workflow "$RUNNER_TEMP/upstream-ci.yml" >> "$GITHUB_OUTPUT"
+          {
+            echo "matrix=$matrix"
+            echo "url=$url"
+            echo "sha256=$(sha256sum "$RUNNER_TEMP/upstream-ci.yml" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Upstream GitHub CI"
+            echo
+            echo "- target branch: \`$PR_BRANCH\` → \`$CI_UPSTREAM_PATH\` (via \`$CI_UPSTREAM_VIA\`)"
+            echo "- pinned: $repo/blob/$sha/$CI_UPSTREAM_PATH"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/plan.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================
-  # Job 2: Setup - repo sync, record PR info, generate snapshot
+  # Job 3: Setup - repo sync, record PR info, generate snapshot
   #         (NO cherry-pick here - done in each ci-tasks group)
   # ============================================================
   setup:
-    needs: parse
-    runs-on: ubuntu-latest
+    needs: [parse]
+    runs-on: ubuntu-24.04
     outputs:
       snapshot: ${{ steps.snapshot.outputs.name }}
     steps:
@@ -139,6 +154,10 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
+            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
+            /usr/local/lib/node_modules /opt/pipx /imagegeneration
           sudo docker image prune --all --force 2>/dev/null || true
           df -h
 
@@ -210,17 +229,25 @@ jobs:
             pr_info_*
 
   # ============================================================
-  # Job 3: CI tasks - parallel by group, cherry-pick + Docker build
+  # Job 4: CI tasks - parallel by group, cherry-pick + Docker build
   # ============================================================
   ci-tasks:
+    name: ci-tasks (${{ matrix.gitee_label }})
     needs: [parse, setup]
-    runs-on: ubuntu-latest
+    # Runner label and job timeout are the upstream ones, evaluated per entry.
+    runs-on: ${{ needs.parse.outputs.runs_on }}
+    timeout-minutes: ${{ matrix.gitee_job_minutes }}
     strategy:
       matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
       fail-fast: false
     outputs:
       status: ${{ steps.check.outputs.status }}
     steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: .ci-runner
+
       - name: Download snapshot and PR info
         uses: actions/download-artifact@v4
         with:
@@ -229,13 +256,21 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: false
+          tool-cache: true
           android: true
           dotnet: true
           haskell: true
           large-packages: true
           docker-images: true
           swap-storage: true
+
+      - name: Extra cleanup
+        run: |
+          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
+            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
+            /usr/local/lib/node_modules /opt/pipx /imagegeneration
+          df -h
 
       - name: Install repo
         run: |
@@ -332,50 +367,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Docker Pull
-        run: docker pull ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx
-
-      - name: Clean up after Docker pull
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          sudo docker builder prune -a 2>/dev/null || true
-          df -h
-
-      - name: Run CI tasks in Docker
+      # Everything from here on is the upstream ci-tasks job itself: the same
+      # steps, conditions, timeouts and GITHUB_ENV hand-off as on GitHub, read
+      # from the commit pinned in the parse job.
+      - name: Fetch pinned upstream workflow
         env:
-          CI_MATRIX_GROUP: ${{ matrix.group }}
+          URL: ${{ needs.parse.outputs.upstream_url }}
+          SHA256: ${{ needs.parse.outputs.upstream_sha256 }}
         run: |
-          WORKSPACE=$(pwd)
-          for task in ${{ join(matrix.tasks, ' ') }}; do
-            echo "=== Building: $task ==="
-            cmake_flag=""
-            cp_base_dir="nuttx"
-            if [[ "$task" == *@* ]]; then
-              cmake_flag="--cmake"
-              task_name=$(echo "$task" | awk -F '@' '{print $1}')
-              cp_base_dir="cmake_out/*"
-            else
-              task_name="$task"
-            fi
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          curl -fsSL "$URL" -o "$RUNNER_TEMP/upstream-ci.yml"
+          echo "$SHA256  $RUNNER_TEMP/upstream-ci.yml" | sha256sum -c -
 
-            if [[ "$task_name" == *:* ]] || [[ "$task_name" == *vendor/* ]] || [[ "$task_name" == ./* ]]; then
-              build_cmd="./build.sh $task_name $cmake_flag -e -Werror -j$(nproc)"
-            else
-              build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task_name $cmake_flag -e -Werror -j$(nproc)"
-            fi
+      - name: Run upstream GitHub CI steps
+        id: upstream
+        env:
+          MATRIX_JSON: ${{ toJSON(matrix) }}
+          GITEE_PR_ID: ${{ needs.parse.outputs.pr_id }}
+          GITEE_PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
+          GITEE_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
+          GITEE_SNAPSHOT: ${{ needs.setup.outputs.snapshot }}
+          GITEE_CI_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .ci-runner/tools/ci/upstream_ci.py run \
+            --workflow "$RUNNER_TEMP/upstream-ci.yml" --matrix "$MATRIX_JSON"
 
-            echo "Build command: $build_cmd"
-            docker run --rm \
-              -v "${WORKSPACE}":/workspace \
-              -w /workspace \
-              ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest \
-              /bin/bash -c "df -h && $build_cmd && ls -atl nuttx"
-
-            echo "=== Cleaning up after $task ==="
-            sudo ~/bin/repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
-            sudo rm -rf cmake_out || true
-          done
+      # Upstream's own upload step, with the name, path and condition it
+      # evaluated to above.
+      - name: Archive CI Build Package
+        if: ${{ !cancelled() && steps.upstream.outputs.archive == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.upstream.outputs.archive_name }}
+          path: ${{ steps.upstream.outputs.archive_path }}
+          if-no-files-found: ${{ steps.upstream.outputs.archive_if_no_files_found }}
+          retention-days: 7
 
       - name: Check status
         id: check
