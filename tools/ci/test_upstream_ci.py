@@ -125,10 +125,44 @@ class Routing(unittest.TestCase):
         with self.assertRaises(uc.Drift):
             uc.resolve_route(DISPATCHER, "unknown")
 
+    def dispatcher(self, fn):
+        import yaml
+        doc = yaml.safe_load(DISPATCHER.read_text())
+        fn(doc["jobs"])
+        path = Path(tempfile.mkdtemp()) / "ci.yml"
+        path.write_text(yaml.safe_dump(doc))
+        return path
+
+    def test_full_condition_is_evaluated(self):
+        def add_draft(jobs):
+            jobs["ci_dev"]["if"] = f"({jobs['ci_dev']['if']}) && github.event.pull_request.draft == false"
+        with self.assertRaisesRegex(uc.Drift, "draft"):
+            uc.resolve_route(self.dispatcher(add_draft), "dev")
+
+        def disable(jobs):
+            jobs["ci_dev"]["if"] = f"false && ({jobs['ci_dev']['if']})"
+        with self.assertRaisesRegex(uc.Drift, "no CI route"):
+            uc.resolve_route(self.dispatcher(disable), "dev")
+
+    def test_ambiguous_route(self):
+        def overlap(jobs):
+            jobs["ci_dev_derived"]["if"] = "startsWith(github.event.pull_request.base.ref, 'dev')"
+        with self.assertRaisesRegex(uc.Drift, "several"):
+            uc.resolve_route(self.dispatcher(overlap), "dev")
+
+    def test_cla_is_not_a_route(self):
+        r = uc.resolve_route(DISPATCHER, "dev")
+        self.assertNotIn("cla", r["CI_UPSTREAM_PATH"])
+
 
 class Plan(unittest.TestCase):
     def check(self, doc):
         return uc.check_plan(doc, uc._contexts_for_check)
+
+    def test_replaced_login_may_use_token(self):
+        # Upstream Docker Login reads secrets.GITHUB_TOKEN; Gitee replaces it.
+        self.assertIn("secrets.GITHUB_TOKEN", DEV.read_text())
+        self.check(uc.load_workflow(DEV))
 
     def test_snapshots_pass(self):
         for path in (DEV, DEV55, TRUNK):
@@ -164,6 +198,10 @@ class Plan(unittest.TestCase):
                 lambda j: steps(j).append({"run": "true"}),
             "job container":
                 lambda j: j.update(container="ubuntu"),
+            "token in an executed step":
+                lambda j: steps(j).insert(-1, {"run": "echo x", "env": {"T": "${{ secrets.GITHUB_TOKEN }}"}}),
+            "github.token in an executed step":
+                lambda j: steps(j).insert(-1, {"run": "echo ${{ github.token }}"}),
             "expression runs-on":
                 lambda j: j.update({"runs-on": "${{ matrix.os }}"}),
         }

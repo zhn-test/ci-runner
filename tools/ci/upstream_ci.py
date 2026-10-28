@@ -528,43 +528,49 @@ def action_name(uses: str) -> str:
 # Branch routing, read from the dispatcher every openvela PR goes through:
 # nuttx/ci.yml -> public-actions/ci.yml@dev -> the per-branch CI workflow.
 # ---------------------------------------------------------------------------
-BASE_REF_EQ = re.compile(r"base\.ref\s*==\s*'([^']+)'")
-BASE_REF_PREFIX = re.compile(
-    r"startsWith\(\s*github\.event\.pull_request\.base\.ref\s*,\s*'([^']+)'\s*\)")
 USES_UPSTREAM = re.compile(
     r"open-vela/public-actions/(\.github/workflows/[\w.\-]+\.ya?ml)@([\w.\-/]+)")
+# Called by the dispatcher but not a build route: carries no ci-tasks job.
+NON_CI_WORKFLOWS = {".github/workflows/cla.yml"}
+
+
+def route_contexts(branch: str) -> Dict[str, Any]:
+    """What a dispatcher condition may read. Anything else is drift."""
+    return {"github": Strict({
+        "event_name": "pull_request_target",
+        "event": Strict({"pull_request": Strict({"base": Strict({"ref": branch})})}),
+    })}
 
 
 def resolve_route(dispatcher: Path, branch: str) -> Dict[str, str]:
+    """Evaluate each dispatcher job's full condition for a PR to *branch*.
+
+    Exactly one public-actions CI workflow must match, as on GitHub.
+    """
     doc = load_workflow(dispatcher)
-    exact: Dict[str, Dict[str, str]] = {}
-    prefixes: List[Tuple[str, Dict[str, str]]] = []
+    ev = Evaluator(route_contexts(branch))
+    matched: List[Dict[str, str]] = []
     for job_name, job in doc["jobs"].items():
-        uses, cond = job.get("uses"), job.get("if")
-        if not isinstance(uses, str) or not isinstance(cond, str):
+        m = USES_UPSTREAM.search(job.get("uses") or "")
+        if not m or m.group(1) in NON_CI_WORKFLOWS:
             continue
-        m = USES_UPSTREAM.search(uses)
-        if not m:
-            continue
-        route = {"CI_UPSTREAM_PATH": m.group(1), "CI_UPSTREAM_REF": m.group(2),
-                 "CI_UPSTREAM_VIA": job_name}
-        for lit in BASE_REF_EQ.findall(cond):
-            exact.setdefault(lit, route)
-        for pre in BASE_REF_PREFIX.findall(cond):
-            prefixes.append((pre, route))
-    if not exact and not prefixes:
-        raise Drift(f"{dispatcher}: no 'base.ref' conditioned job calls a public-actions workflow")
-    if branch in exact:
-        route = exact[branch]
-    else:
-        route = next((r for p, r in sorted(prefixes, key=lambda x: -len(x[0]))
-                      if branch.startswith(p)), None)
-        if route is None:
-            raise Drift(f"{dispatcher}: no route for target branch {branch!r}; "
-                        "GitHub CI runs nothing for it, so neither does Gitee")
-    # cla.yml or any other workflow without the build job is not a CI route;
-    # that is checked when the routed workflow is loaded.
-    return route
+        cond = job.get("if")
+        if not isinstance(cond, str):
+            raise Drift(f"{dispatcher}: CI job {job_name!r} has no 'if'; it would run for every branch")
+        try:
+            hit = eval_if(cond, ev)
+        except Drift as exc:
+            raise Drift(f"{dispatcher}: cannot evaluate the condition of {job_name!r}: {exc}") from exc
+        if hit:
+            matched.append({"CI_UPSTREAM_PATH": m.group(1), "CI_UPSTREAM_REF": m.group(2),
+                            "CI_UPSTREAM_VIA": job_name})
+    if not matched:
+        raise Drift(f"{dispatcher}: no CI route for target branch {branch!r}; "
+                    "GitHub CI runs nothing for it, so neither does Gitee")
+    if len(matched) > 1:
+        raise Drift(f"{dispatcher}: target branch {branch!r} matches several CI routes: "
+                    f"{[r['CI_UPSTREAM_VIA'] for r in matched]}")
+    return matched[0]
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +733,8 @@ def check_plan(doc: dict, contexts_for) -> List[Tuple[str, str]]:
                 for v in scope.values():
                     interpolate(v, ev)
             for step in post:
+                if "uses" in step and action_name(step["uses"]) == LOGIN_ACTION:
+                    continue  # replaced by Gitee; its token never reaches upstream code
                 eval_if(step.get("if"), ev)
                 for key in ("run", "working-directory", "timeout-minutes", "continue-on-error",
                             "shell"):
@@ -754,7 +762,6 @@ def gitee_contexts(matrix: Dict[str, Any], env: Optional[Dict[str, str]] = None,
             "run_number": e.get("GITHUB_RUN_NUMBER", "0"),
             "event_name": "pull_request_target",
             "actor": e.get("GITHUB_ACTOR", ""),
-            "token": e.get("GITEE_CI_GITHUB_TOKEN", ""),
             "event": Strict({"pull_request": Strict({
                 "number": int(pr) if pr.isdigit() else pr,
                 "base": Strict({"ref": e.get("GITEE_PR_BRANCH", "")}),
@@ -764,7 +771,8 @@ def gitee_contexts(matrix: Dict[str, Any], env: Optional[Dict[str, str]] = None,
             "TRIGGER_REPO_NAME": e.get("GITEE_TRIGGER_REPO", ""),
             "SNAPSHOT": e.get("GITEE_SNAPSHOT", ""),
         })})}),
-        "secrets": Strict({"GITHUB_TOKEN": e.get("GITEE_CI_GITHUB_TOKEN", "")}),
+        # No credentials: steps Gitee executes never see a GitHub token.
+        "secrets": Strict({}),
         "runner": Strict({"os": "Linux", "temp": e.get("RUNNER_TEMP", "/tmp"),
                           "arch": e.get("RUNNER_ARCH", "X64")}),
         "job": Strict({"status": status}),

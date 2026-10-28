@@ -2,7 +2,7 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
-# PROBE ONLY: push-triggered copy for verification, with a fixed Gitee payload.
+# PROBE ONLY: push-triggered, fixed Gitee baseline payload (pr_id 0, no PR).
 on:
   push:
     branches: [ci/upstream-step-exec-probe]
@@ -94,25 +94,32 @@ jobs:
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           repo=https://github.com/open-vela/public-actions
           raw=https://raw.githubusercontent.com/open-vela/public-actions
-          sha_of() { git ls-remote "$repo.git" "refs/heads/$1" | cut -f1; }
+          fetch() { curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 "$1" -o "$2"; }
+          sha_of() {
+            local out
+            out=$(git ls-remote "$repo.git" "refs/heads/$1") && [ -n "$out" ] || {
+              echo "::error::cannot resolve open-vela/public-actions branch $1" >&2; return 1; }
+            echo "${out%%[[:space:]]*}"
+          }
 
           # Every openvela PR goes through public-actions/ci.yml@dev, which
           # picks the CI workflow by target branch; read it rather than guess.
           dev_sha=$(sha_of dev)
-          [ -n "$dev_sha" ] || { echo "::error::cannot resolve public-actions dev"; exit 1; }
-          curl -fsSL "$raw/$dev_sha/.github/workflows/ci.yml" -o "$RUNNER_TEMP/dispatcher.yml"
+          fetch "$raw/$dev_sha/.github/workflows/ci.yml" "$RUNNER_TEMP/dispatcher.yml"
           python3 tools/ci/upstream_ci.py route --dispatcher "$RUNNER_TEMP/dispatcher.yml" \
             --branch "$PR_BRANCH" | tee "$RUNNER_TEMP/route.env"
-          . "$RUNNER_TEMP/route.env"
+          while IFS='=' read -r k v; do
+            case "$k" in CI_UPSTREAM_PATH|CI_UPSTREAM_REF|CI_UPSTREAM_VIA) printf -v "$k" '%s' "$v" ;; esac
+          done < "$RUNNER_TEMP/route.env"
 
           sha=$dev_sha
           [ "$CI_UPSTREAM_REF" = dev ] || sha=$(sha_of "$CI_UPSTREAM_REF")
-          [ -n "$sha" ] || { echo "::error::cannot resolve public-actions $CI_UPSTREAM_REF"; exit 1; }
           url="$raw/$sha/$CI_UPSTREAM_PATH"
-          curl -fsSL "$url" -o "$RUNNER_TEMP/upstream-ci.yml"
+          fetch "$url" "$RUNNER_TEMP/upstream-ci.yml"
 
           python3 tools/ci/upstream_ci.py check --workflow "$RUNNER_TEMP/upstream-ci.yml" | tee "$RUNNER_TEMP/plan.txt"
-          matrix=$(python3 tools/ci/upstream_ci.py matrix --workflow "$RUNNER_TEMP/upstream-ci.yml")
+          matrix=$(python3 tools/ci/upstream_ci.py matrix --workflow "$RUNNER_TEMP/upstream-ci.yml" \
+            | python3 -c 'import json,sys;m=json.load(sys.stdin);m["include"]=[e for e in m["include"] if e["group"]=="ntfc-sim"];print(json.dumps(m))')  # PROBE
           python3 tools/ci/upstream_ci.py info --workflow "$RUNNER_TEMP/upstream-ci.yml" >> "$GITHUB_OUTPUT"
           {
             echo "matrix=$matrix"
@@ -161,8 +168,7 @@ jobs:
           sudo docker image prune --all --force 2>/dev/null || true
           df -h
 
-      # PROBE ONLY: the Gitee mirror of this project lacks its LFS objects
-      # (batch API returns 404); fetch the same commit from GitHub instead.
+      # PROBE ONLY: Gitee mirror of this project lacks LFS objects; same commit from GitHub.
       - name: "PROBE: work around missing Gitee LFS objects"
         run: |
           git config --global url."https://github.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf".insteadOf \
@@ -286,8 +292,7 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      # PROBE ONLY: the Gitee mirror of this project lacks its LFS objects
-      # (batch API returns 404); fetch the same commit from GitHub instead.
+      # PROBE ONLY: Gitee mirror of this project lacks LFS objects; same commit from GitHub.
       - name: "PROBE: work around missing Gitee LFS objects"
         run: |
           git config --global url."https://github.com/open-vela/prebuilts_gcc_linux-x86_64_riscv-none-elf".insteadOf \
@@ -384,6 +389,12 @@ jobs:
       # Everything from here on is the upstream ci-tasks job itself: the same
       # steps, conditions, timeouts and GITHUB_ENV hand-off as on GitHub, read
       # from the commit pinned in the parse job.
+      # PROBE ONLY: make the NTFC runtime fail after it starts.
+      - name: "PROBE: inject NTFC failure"
+        run: |
+          f=nuttx/boards/sim/sim/sim/configs/citest/run.sh
+          printf '#!/bin/bash\nmkdir -p nuttx/result\necho injected > nuttx/result/injected.log\necho "PROBE: injected NTFC failure"\nexit 1\n' > "$f"
+
       - name: Fetch pinned upstream workflow
         env:
           URL: ${{ needs.parse.outputs.upstream_url }}
@@ -391,7 +402,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          curl -fsSL "$URL" -o "$RUNNER_TEMP/upstream-ci.yml"
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 "$URL" -o "$RUNNER_TEMP/upstream-ci.yml"
           echo "$SHA256  $RUNNER_TEMP/upstream-ci.yml" | sha256sum -c -
 
       - name: Run upstream GitHub CI steps
@@ -402,7 +413,6 @@ jobs:
           GITEE_PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
           GITEE_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
           GITEE_SNAPSHOT: ${{ needs.setup.outputs.snapshot }}
-          GITEE_CI_GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 .ci-runner/tools/ci/upstream_ci.py run \
             --workflow "$RUNNER_TEMP/upstream-ci.yml" --matrix "$MATRIX_JSON"
