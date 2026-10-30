@@ -2,9 +2,11 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
+# PROBE ONLY: push-triggered, fixed Gitee baseline payload (pr_id 0, no PR).
 on:
-  repository_dispatch:
-    types: [gitee-pr-ci]
+  push:
+    branches: [ci/explicit-tasks-probe]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -28,7 +30,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          CLIENT_PAYLOAD: '{"org":"open-vela","repo":"nuttx","pr_id":"0","pr_branch":"dev","manifest_url":"https://gitee.com/open-vela/manifests.git","repo_http_url":"https://gitee.com/open-vela/nuttx.git","pr_description":""}'
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
@@ -351,6 +353,17 @@ jobs:
             ln -s /tools/riscv-none-elf-gcc "$tc"
             "$tc/bin/riscv-none-elf-gcc" --version | head -1 | grep -q xPack
           '
+
+      # PROBE ONLY: make ntfc-sim's NTFC runtime fail; committed so the
+      # post-build "git reset --hard HEAD" keeps it.
+      - name: "PROBE: inject NTFC failure"
+        if: ${{ matrix.group == 'ntfc-sim' }}
+        run: |
+          cd nuttx
+          f=boards/sim/sim/sim/configs/citest/run.sh
+          printf '#!/bin/bash\nmkdir -p nuttx/result\necho injected > nuttx/result/injected.log\necho "PROBE: injected NTFC failure"\nexit 1\n' > "$f"
+          chmod +x "$f"
+          git -c user.name=probe -c user.email=probe@example.invalid commit -qam "PROBE: inject NTFC failure"
 
       - name: Build tasks
         env:
