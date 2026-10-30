@@ -1,0 +1,159 @@
+# Gitee CI task sets, maintained by hand.
+#
+# Each set mirrors the ci-tasks matrix of one open-vela/public-actions workflow,
+# as of the commit in 'upstream'. When upstream changes, update the set and the
+# commit here; the parse job only warns when they no longer match.
+#
+# Task fields:
+#   config        build.sh configuration
+#   build_system  make | cmake
+#   test_kind     none | ntfc   (an ntfc group must hold exactly one task)
+# Group fields:
+#   toolchain     optional: riscv-xpack (use the CI image's xPack RISC-V GCC)
+
+# NTFC versions, as in the dev ci-real.yml runtime step.
+ntfc:
+  ntfc: "ntfc @ git+https://github.com/apache/nuttx-ntfc.git@9e17dbeacd02c9081dd0512dac5e6a3cf4730167"
+  pytest: "pytest==9.1.1"
+  testing_repo: https://github.com/apache/nuttx-ntfc-testing.git
+  testing_ref: release-0.0.2
+
+branches:            # target branch (glob) -> task set; first match wins
+  dev: dev
+  dev-*: dev-derived
+  trunk: trunk
+  rebase_dev_trunk*: trunk
+
+sets:
+  dev:
+    upstream: {ref: dev, path: .github/workflows/ci-real.yml, commit: 0ccbd5e1673b}
+    groups:
+      - group: goldfish
+        tasks:
+          - {config: goldfish-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-x86_64-ap, build_system: cmake, test_kind: none}
+      - group: sil
+        tasks:
+          - {config: vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_bl, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_core0, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/sil_arm32r_nsh_bl, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/sil_arm32r_nsh_core0, build_system: cmake, test_kind: none}
+      - group: aurix
+        tasks:
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/bl, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core0, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core1, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core2, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core3, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core4, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core5, build_system: cmake, test_kind: none}
+      - group: flagchip
+        tasks:
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/bl, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/core0, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kbl, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kcore0, build_system: cmake, test_kind: none}
+      - group: qemu
+        tasks:
+          - {config: qemu-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-arm64-v8a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-bl, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-tee, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v8m-ap, build_system: cmake, test_kind: none}
+      - group: ntfc-sim
+        tasks:
+          - {config: sim:citest, build_system: make, test_kind: ntfc}
+      - group: ntfc-rv32
+        tasks:
+          - {config: rv-virt:citest, build_system: make, test_kind: ntfc}
+      - group: ntfc-rv64
+        toolchain: riscv-xpack
+        tasks:
+          - {config: rv-virt:citest64, build_system: make, test_kind: ntfc}
+      - group: ntfc-sabre
+        tasks:
+          - {config: sabre-6quad:citest, build_system: make, test_kind: ntfc}
+      - group: ntfc-armv8a
+        tasks:
+          - {config: qemu-armv8a:citest, build_system: cmake, test_kind: ntfc}
+      - group: ntfc-armv8a-smp
+        tasks:
+          - {config: qemu-armv8a:citest_smp, build_system: cmake, test_kind: ntfc}
+      - group: ntfc-intel64
+        tasks:
+          - {config: qemu-intel64:citest_smp, build_system: make, test_kind: ntfc}
+  dev-derived:
+    upstream: {ref: dev, path: .github/workflows/ci-real_trunk-5.5.yml, commit: 0ccbd5e1673b}
+    groups:
+      - group: goldfish
+        tasks:
+          - {config: goldfish-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-x86_64-ap, build_system: cmake, test_kind: none}
+      - group: sil
+        tasks:
+          - {config: vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_bl, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_core0, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/sil_arm32r_nsh_bl, build_system: cmake, test_kind: none}
+          - {config: vendor/openvela/boards/sil/configs/sil_arm32r_nsh_core0, build_system: cmake, test_kind: none}
+      - group: aurix
+        tasks:
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/bl, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core0, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core1, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core2, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core3, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core4, build_system: cmake, test_kind: none}
+          - {config: vendor/infineon/boards/aurix/tc4d9_evb/configs/core5, build_system: cmake, test_kind: none}
+      - group: flagchip
+        tasks:
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/bl, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/core0, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kbl, build_system: cmake, test_kind: none}
+          - {config: vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kcore0, build_system: cmake, test_kind: none}
+      - group: qemu
+        tasks:
+          - {config: qemu-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-arm64-v8a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-bl, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-tee, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v8m-ap, build_system: cmake, test_kind: none}
+  trunk:
+    upstream: {ref: trunk, path: .github/workflows/ci.yml, commit: d9461a712675}
+    groups:
+      - group: goldfish
+        tasks:
+          - {config: goldfish-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: goldfish-x86_64-ap, build_system: cmake, test_kind: none}
+      - group: qemu
+        tasks:
+          - {config: qemu-arm64-v8a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-arm64-v8a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-ap, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-bl, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-server, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v7a-tee, build_system: cmake, test_kind: none}
+          - {config: qemu-armeabi-v8m-ap, build_system: cmake, test_kind: none}
+      - group: sil
+        tasks:
+          - {config: ./vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_core0, build_system: cmake, test_kind: none}
+          - {config: ./vendor/openvela/boards/sil/configs/ksil_arm32r_nsh_bl, build_system: cmake, test_kind: none}
+      - group: aurix
+        tasks:
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/bl, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core0, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core1, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core2, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core3, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core4, build_system: cmake, test_kind: none}
+          - {config: ./vendor/infineon/boards/aurix/tc4d9_evb/configs/core5, build_system: cmake, test_kind: none}
+      - group: flagchip
+        tasks:
+          - {config: ./vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kbl, build_system: cmake, test_kind: none}
+          - {config: ./vendor/flagchip/boards/fc7300/fc7300f8m-evb/configs/kcore0, build_system: cmake, test_kind: none}

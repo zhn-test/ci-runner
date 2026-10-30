@@ -14,7 +14,7 @@ jobs:
   # Job 1: Parse payload + fetch matrix
   # ============================================================
   parse:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       org: ${{ steps.p.outputs.org }}
       repo: ${{ steps.p.outputs.repo }}
@@ -23,7 +23,7 @@ jobs:
       manifest_url: ${{ steps.p.outputs.manifest_url }}
       repo_http_url: ${{ steps.p.outputs.repo_http_url }}
       all_pr: ${{ steps.p.outputs.all_pr }}
-      matrix: ${{ steps.p.outputs.matrix }}
+      matrix: ${{ steps.m.outputs.matrix }}
     steps:
       - name: Parse and validate payload
         id: p
@@ -72,50 +72,22 @@ jobs:
           ALL_PR=$(echo $ALL_PR | xargs)
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
 
-          # Fetch build matrix from public-actions
-          # Support dev and dev-* branches (e.g. dev-ai-contest-2026)
-          if [ "$PR_BRANCH" = "dev" ] || [[ "$PR_BRANCH" == dev-* ]]; then
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
-          else
-            CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
-          fi
-          echo "Fetching matrix from: $CI_URL" >&2
-          CI_YAML=$(curl -s "$CI_URL")
-          MATRIX=$(echo "$CI_YAML" | python3 -c "
-          import sys, re, json
-          content = sys.stdin.read()
-          groups = []
-          current_group = None
-          current_tasks = []
-          in_tasks = False
-          for line in content.split('\n'):
-              s = line.strip()
-              if '- group:' in s:
-                  if current_group and current_tasks:
-                      groups.append({'group': current_group, 'tasks': current_tasks})
-                  current_group = s.split('- group:')[1].strip().split('#')[0].strip()
-                  current_tasks = []
-                  in_tasks = False
-              elif 'tasks:' in s and current_group:
-                  in_tasks = True
-                  m = re.search(r'tasks:\s*\[([^\]]+)\]', s)
-                  if m:
-                      for t in m.group(1).split(','):
-                          t = t.strip().strip('\"').strip(\"'\")
-                          if t: current_tasks.append(t)
-                      in_tasks = False
-              elif in_tasks and s.startswith('- '):
-                  t = s[2:].strip().strip('\"').strip(\"'\")
-                  if t and not t.startswith('#'):
-                      current_tasks.append(t)
-              elif in_tasks and s and not s.startswith('#') and not s.startswith('-'):
-                  in_tasks = False
-          if current_group and current_tasks:
-              groups.append({'group': current_group, 'tasks': current_tasks})
-          print(json.dumps({'include': groups}))
-          ")
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Matrix: $MATRIX" >&2
+      # The task list is maintained in tools/ci/tasks.yml, not read from
+      # public-actions. The drift check only warns.
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select task set
+        id: m
+        env:
+          PR_BRANCH: ${{ steps.p.outputs.pr_branch }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
+          echo "matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")" >> "$GITHUB_OUTPUT"
+          python3 tools/ci/tasks.py drift --branch "$PR_BRANCH" || true
 
   # ============================================================
   # Job 3: Setup - repo sync, record PR info, generate snapshot
@@ -124,7 +96,7 @@ jobs:
   setup:
     needs: [parse]
     if: needs.parse.outputs.repo != 'docs'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       snapshot: ${{ steps.snapshot.outputs.name }}
     steps:
@@ -222,13 +194,22 @@ jobs:
   ci-tasks:
     needs: [parse, setup]
     if: needs.parse.outputs.repo != 'docs'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.ntfc && 180 || 360 }}
+    env:
+      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
     strategy:
       matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
       fail-fast: false
     outputs:
       status: ${{ steps.check.outputs.status }}
     steps:
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: .ci-runner
+          persist-credentials: false
+
       - name: Download snapshot and PR info
         uses: actions/download-artifact@v4
         with:
@@ -349,7 +330,7 @@ jobs:
           password: ${{ github.token }}
 
       - name: Docker Pull
-        run: docker pull ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx
+        run: docker pull "$CI_IMAGE"
 
       - name: Clean up after Docker pull
         run: |
@@ -358,40 +339,80 @@ jobs:
           sudo docker builder prune -a 2>/dev/null || true
           df -h
 
-      - name: Run CI tasks in Docker
-        env:
-          CI_MATRIX_GROUP: ${{ matrix.group }}
+      # Same swap as public-actions ci-real.yml: the manifest GCC cannot link rv64.
+      - name: Use Apache xPack RISC-V toolchain
+        if: ${{ matrix.toolchain == 'riscv-xpack' }}
         run: |
-          WORKSPACE=$(pwd)
-          for task in ${{ join(matrix.tasks, ' ') }}; do
-            echo "=== Building: $task ==="
-            cmake_flag=""
-            cp_base_dir="nuttx"
-            if [[ "$task" == *@* ]]; then
-              cmake_flag="--cmake"
-              task_name=$(echo "$task" | awk -F '@' '{print $1}')
-              cp_base_dir="cmake_out/*"
-            else
-              task_name="$task"
-            fi
+          docker run --rm -v "$(pwd)":/workspace -w /workspace "$CI_IMAGE" /bin/bash -c '
+            set -e
+            tc=/workspace/prebuilts/gcc/linux-x86_64/riscv-none-elf
+            riscv-none-elf-gcc --version | head -1
+            mv "$tc" "$tc.manifest"
+            ln -s /tools/riscv-none-elf-gcc "$tc"
+            "$tc/bin/riscv-none-elf-gcc" --version | head -1 | grep -q xPack
+          '
 
-            if [[ "$task_name" == *:* ]] || [[ "$task_name" == *vendor/* ]] || [[ "$task_name" == ./* ]]; then
-              build_cmd="./build.sh $task_name $cmake_flag -e -Werror -j$(nproc)"
-            else
-              build_cmd="./build.sh vendor/openvela/boards/vela/configs/$task_name $cmake_flag -e -Werror -j$(nproc)"
-            fi
+      - name: Build tasks
+        env:
+          CI_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
+          CI_PR_NUMBER: ${{ needs.parse.outputs.pr_id }}
+          TASKS: ${{ matrix.tasks }}
+        run: bash .ci-runner/tools/ci/build_tasks.sh "${{ matrix.group }}" "$TASKS"
 
-            echo "Build command: $build_cmd"
-            docker run --rm \
-              -v "${WORKSPACE}":/workspace \
-              -w /workspace \
-              ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest \
-              /bin/bash -c "df -h && $build_cmd && ls -atl nuttx"
+      # Own step and timeout, as in public-actions ci-real.yml: a step timeout
+      # is an ordinary failure, so collection and upload below still run.
+      - name: Run NTFC runtime tests
+        if: ${{ matrix.ntfc }}
+        timeout-minutes: 130
+        env:
+          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          while IFS='=' read -r k v; do export "$k=$v"; done < <(python3 .ci-runner/tools/ci/tasks.py env)
+          test -n "${NTFC_TASK:-}" && test -n "${NTFC_ARTIFACT:-}"
+          board="${NTFC_TASK%%:*}" config="${NTFC_TASK##*:}"
+          cfgdir=$(ls -d nuttx/boards/*/*/"$board"/configs/"$config" 2>/dev/null | head -1 || true)
+          if [ -z "$cfgdir" ] || [ ! -f "$cfgdir/config.yaml" ] || [ ! -x "$cfgdir/run.sh" ]; then
+            echo "::error::$NTFC_TASK needs config.yaml and an executable run.sh"
+            exit 1
+          fi
+          docker run --name "$NTFC_CONTAINER" -v "$(pwd)":/workspace -w /workspace \
+            -e NTFCDIR=/workspace/.ntfc \
+            -e CURRENTCONFDIR="/workspace/$cfgdir" \
+            -e ARTIFACTCONFDIR="/workspace/$NTFC_ARTIFACT" \
+            "$CI_IMAGE" /bin/bash -c "set -e && \
+              python3 -m venv /workspace/.ntfc-venv && \
+              /workspace/.ntfc-venv/bin/pip install --quiet '$NTFC_SPEC' '$PYTEST_SPEC' && \
+              export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
+              rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
+              git clone --depth=1 --branch '$NTFC_TESTING_REF' '$NTFC_TESTING_REPO' \
+                /workspace/.ntfc/external/nuttx-testing && \
+              cp -a $NTFC_ARTIFACT/. nuttx/ && \
+              mkdir -p nuttx/build && cp -a $NTFC_ARTIFACT/. nuttx/build/ && \
+              bash /workspace/$cfgdir/run.sh"
 
-            echo "=== Cleaning up after $task ==="
-            sudo ~/bin/repo forall -c 'git clean -dfx; git reset --hard HEAD' > /dev/null 2>&1 || true
-            sudo rm -rf cmake_out || true
-          done
+      # run.sh moves its results only after ntfc returns; recover them on a
+      # failure or timeout and always remove the named container.
+      - name: Collect NTFC diagnostics
+        if: ${{ always() && matrix.ntfc }}
+        env:
+          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker rm -f "$NTFC_CONTAINER" 2>/dev/null || true
+          [ -n "${NTFC_ARTIFACT:-}" ] || exit 0
+          dest="$NTFC_ARTIFACT/ntfc"
+          mkdir -p "$dest"
+          [ -d nuttx/result ] && sudo mv nuttx/result "$dest/"
+          [ -f nuttx/pytest.debug.log ] && sudo mv nuttx/pytest.debug.log "$dest/"
+          sudo chown -R "$(id -u):$(id -g)" "$dest"
+          echo "collected $(find "$dest" -type f | wc -l) file(s)"
+
+      - name: Archive CI Build Package
+        if: ${{ success() || (!cancelled() && matrix.ntfc) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build_Package_${{ matrix.group }}
+          path: ${{ matrix.group }}
 
       - name: Check status
         id: check
