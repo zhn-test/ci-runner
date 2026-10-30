@@ -194,6 +194,7 @@ jobs:
   # Job 4: CI tasks - parallel by group, cherry-pick + Docker build
   # ============================================================
   ci-tasks:
+    name: ci-tasks (${{ matrix.group }})
     needs: [parse, setup]
     if: needs.parse.outputs.repo != 'docs'
     runs-on: ubuntu-24.04
