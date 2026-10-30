@@ -6,7 +6,8 @@ on:
   repository_dispatch:
     types: [gitee-pr-ci]
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   # ============================================================
@@ -72,7 +73,8 @@ jobs:
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
 
           # Fetch build matrix from public-actions
-          if [ "$PR_BRANCH" = "dev" ]; then
+          # Support dev and dev-* branches (e.g. dev-ai-contest-2026)
+          if [ "$PR_BRANCH" = "dev" ] || [[ "$PR_BRANCH" == dev-* ]]; then
             CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/dev/.github/workflows/ci-real.yml"
           else
             CI_URL="https://raw.githubusercontent.com/open-vela/public-actions/trunk/.github/workflows/ci.yml"
@@ -116,11 +118,12 @@ jobs:
           echo "Matrix: $MATRIX" >&2
 
   # ============================================================
-  # Job 2: Setup - repo sync, record PR info, generate snapshot
+  # Job 3: Setup - repo sync, record PR info, generate snapshot
   #         (NO cherry-pick here - done in each ci-tasks group)
   # ============================================================
   setup:
-    needs: parse
+    needs: [parse]
+    if: needs.parse.outputs.repo != 'docs'
     runs-on: ubuntu-latest
     outputs:
       snapshot: ${{ steps.snapshot.outputs.name }}
@@ -139,6 +142,10 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
+            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
+            /usr/local/lib/node_modules /opt/pipx /imagegeneration
           sudo docker image prune --all --force 2>/dev/null || true
           df -h
 
@@ -210,10 +217,11 @@ jobs:
             pr_info_*
 
   # ============================================================
-  # Job 3: CI tasks - parallel by group, cherry-pick + Docker build
+  # Job 4: CI tasks - parallel by group, cherry-pick + Docker build
   # ============================================================
   ci-tasks:
     needs: [parse, setup]
+    if: needs.parse.outputs.repo != 'docs'
     runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
@@ -229,13 +237,21 @@ jobs:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: false
+          tool-cache: true
           android: true
           dotnet: true
           haskell: true
           large-packages: true
           docker-images: true
           swap-storage: true
+
+      - name: Extra cleanup
+        run: |
+          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
+            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
+            /usr/local/lib/node_modules /opt/pipx /imagegeneration
+          df -h
 
       - name: Install repo
         run: |
