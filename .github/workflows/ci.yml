@@ -86,7 +86,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          echo "matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")" >> "$GITHUB_OUTPUT"
+          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
           python3 tools/ci/tasks.py drift --branch "$PR_BRANCH" || true
 
   # ============================================================
@@ -414,6 +415,7 @@ jobs:
         with:
           name: Build_Package_${{ matrix.group }}
           path: ${{ matrix.group }}
+          include-hidden-files: true  # keep .config
 
       - name: Check status
         id: check
