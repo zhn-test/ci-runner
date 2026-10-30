@@ -84,8 +84,7 @@ SHELLS = {
     "sh": ["sh", "-e", "{0}"],
 }
 DEFAULT_JOB_MINUTES = 360
-# Seconds per timeout minute. Only the tests shorten it.
-MINUTE_SECONDS = float(os.environ.get("UPSTREAM_CI_MINUTE_SECONDS", "60"))
+MINUTE_SECONDS = 60
 
 
 # ---------------------------------------------------------------------------

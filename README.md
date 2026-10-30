@@ -33,11 +33,4 @@ way that cannot be followed faithfully:
 - a target branch matching no CI route, or several;
 - a job-level `container`, `services`, `defaults`, or a non-literal `runs-on`.
 
-## Tests
-
-```bash
-python3 tools/ci/test_upstream_ci.py                  # testdata snapshots
-UPSTREAM_LIVE=1 python3 tools/ci/test_upstream_ci.py  # also current upstream
-```
-
 `gitee_ci.sh` is not used by `ci.yml`.

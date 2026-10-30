@@ -1,9 +1,0 @@
-Snapshots of the open-vela/public-actions workflows used by test_upstream_ci.py.
-
-dev   0ccbd5e1673b21c5642a855900f1d4709a7b823f   ci-real.yml, ci-real_trunk-5.5.yml, ci.yml
-trunk d9461a71267547dfbe0e81cea8d0286b699c6781   ci.yml
-
-The tests run against these copies so they are reproducible. To check the
-current upstream instead, run:
-
-    UPSTREAM_LIVE=1 python3 tools/ci/test_upstream_ci.py
