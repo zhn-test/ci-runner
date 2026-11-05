@@ -14,6 +14,7 @@ jobs:
           persist-credentials: false
       - name: Logic cases
         run: |
+          set +e
           fail=0
           echo "=== case none"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Plain description\"}"
