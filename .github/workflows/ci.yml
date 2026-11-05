@@ -2,9 +2,10 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
+# PROBE ONLY: push-triggered, fixed payload, no Jenkins.
 on:
-  repository_dispatch:
-    types: [gitee-pr-ci]
+  push:
+    branches: [ci/probe-docs]
 
 permissions:
   contents: read
@@ -28,7 +29,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          CLIENT_PAYLOAD: "{\"org\": \"open-vela\", \"repo\": \"docs\", \"pr_id\": \"0\", \"pr_branch\": \"docs-trunk-tmp\", \"manifest_url\": \"https://gitee.com/open-vela/manifests.git\", \"repo_http_url\": \"https://gitee.com/open-vela/docs.git\", \"pr_description\": \"\"}"
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
