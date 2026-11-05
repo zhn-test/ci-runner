@@ -19,4 +19,11 @@ with upstream and only warns on a difference; it never blocks the run.
 Build, NTFC runtime test, diagnostics collection and upload are separate
 workflow steps, as in public-actions `ci-real.yml`.
 
+A target branch without a task set fails the run instead of passing with
+nothing built; the `docs` repository has no build tasks and skips them.
+
+`depends-on` entries must be `https://gitee.com/open-vela/<repo>/pulls/<N>`,
+separated by commas or spaces. A malformed or cross-organization entry, or a
+dependency whose project is not in the manifest, fails the run.
+
 `gitee_ci.sh` is not used by `ci.yml`.

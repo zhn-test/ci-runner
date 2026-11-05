@@ -50,27 +50,30 @@ jobs:
           echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
           echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
 
-          # Parse depends-on
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
-          DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          DEPENDS=${DEPENDS//,/ }  # accept both "a, b" and "a b"
-          PR_LIST="$CURRENT_PR $DEPENDS"
-          PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
-
-          ALL_PR=""
-          for url in $PR_LIST; do
-            if echo "$url" | grep -qP '^https://gitee\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/pulls/[0-9]+$'; then
-              pair=$(echo "$url" | sed -n 's#https://gitee.com/\([^/]\+/[^/]\+\)/pulls/\([0-9]\+\)#\1:\2#p')
-              [ -n "$pair" ] && ALL_PR="$ALL_PR $pair"
-            fi
-          done
-          manifest_part=$(echo "$ALL_PR" | grep -o 'open-vela/manifests[^ ]*' || true)
-          if [ -n "$manifest_part" ]; then
-            rest=$(echo "$ALL_PR" | sed "s|$manifest_part||" | xargs)
-            ALL_PR="$manifest_part $rest"
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
           fi
-          ALL_PR=$(echo $ALL_PR | xargs)
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
 
       # The task list is maintained in tools/ci/tasks.yml, not read from
@@ -84,8 +87,15 @@ jobs:
         id: m
         env:
           PR_BRANCH: ${{ steps.p.outputs.pr_branch }}
+          REPO: ${{ steps.p.outputs.repo }}
         run: |
           set -euo pipefail
+          if [ "$REPO" = docs ]; then
+            # setup and ci-tasks are skipped for docs; this placeholder is never expanded.
+            echo 'matrix={"include":[{"group":"docs"}]}' >> "$GITHUB_OUTPUT"
+            echo "docs repository: no build tasks"
+            exit 0
+          fi
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
@@ -102,9 +112,6 @@ jobs:
     outputs:
       snapshot: ${{ steps.snapshot.outputs.name }}
     steps:
-      - name: Checkout CI scripts
-        uses: actions/checkout@v5
-
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -181,10 +188,12 @@ jobs:
               LATEST_SHA=$(git rev-parse pr-branch)
               cd -
             else
-              REPO_PATH=$(grep "\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | awk -F'"' '{print $2}')
+              line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | head -1 || true)
+              REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
+              [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
               if [ -z "$REPO_PATH" ]; then
-                echo "WARNING: Could not find path for $PROJECT_NAME"
-                continue
+                echo "::error::$REPO_FULL_PATH is not in the manifest, so PR #$PR_NUMBER cannot be built"
+                exit 1
               fi
               cd "$REPO_PATH"
               git fetch "https://gitee.com/$REPO_FULL_PATH.git" "pull/$PR_NUMBER/head:pr-branch"
@@ -319,19 +328,19 @@ jobs:
             # Get commit SHA from PR info file
             PR_COMMIT=$(grep "^${REPO_FULL_PATH}:" "$PR_INFO_FILE" | awk -F':' '{print $3}')
             if [ -z "$PR_COMMIT" ]; then
-              echo "WARNING: No commit info for $REPO_FULL_PATH, skipping"
-              continue
+              echo "::error::No recorded commit for $REPO_FULL_PATH PR #$PR_NUMBER"
+              exit 1
             fi
 
             if [ "$PROJECT_NAME" = "manifests" ]; then
               echo "manifests PR #$PR_NUMBER is already in the snapshot"
             else
-              REPO_NAME=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
-              REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'path="' '{print $2}' | awk -F'"' '{print $1}')
-              [ -z "$REPO_PATH" ] && REPO_PATH="$REPO_NAME"
+              line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | head -1 || true)
+              REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
+              [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
               if [ -z "$REPO_PATH" ]; then
-                echo "WARNING: Could not find path for $PROJECT_NAME"
-                continue
+                echo "::error::$REPO_FULL_PATH is not in the snapshot, so PR #$PR_NUMBER cannot be built"
+                exit 1
               fi
               cd "$REPO_PATH"
               git fetch openvela "pull/$PR_NUMBER/head:pr-branch"
@@ -387,7 +396,10 @@ jobs:
         run: |
           set -euo pipefail
           while IFS='=' read -r k v; do export "$k=$v"; done < <(python3 .ci-runner/tools/ci/tasks.py env)
-          test -n "${NTFC_TASK:-}" && test -n "${NTFC_ARTIFACT:-}"
+          if [ -z "${NTFC_TASK:-}" ] || [ -z "${NTFC_ARTIFACT:-}" ]; then
+            echo "::error::the ntfc group built no task that set NTFC_TASK"
+            exit 1
+          fi
           board="${NTFC_TASK%%:*}" config="${NTFC_TASK##*:}"
           cfgdir=$(ls -d nuttx/boards/*/*/"$board"/configs/"$config" 2>/dev/null | head -1 || true)
           if [ -z "$cfgdir" ] || [ ! -f "$cfgdir/config.yaml" ] || [ ! -x "$cfgdir/run.sh" ]; then

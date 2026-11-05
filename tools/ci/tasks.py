@@ -34,10 +34,12 @@ def task_set(doc, branch):
     for pattern, name in doc["branches"].items():
         if fnmatch.fnmatchcase(branch, pattern):
             return name, doc["sets"][name]
-    fail(f"no task set for target branch {branch!r}")
+    fail(f"no task set for target branch {branch!r}; add it to 'branches' if it needs CI")
 
 
 def validate(name, tset):
+    if not tset.get("groups"):
+        fail(f"{name}: no groups")
     seen = set()
     for g in tset["groups"]:
         group = g.get("group")
