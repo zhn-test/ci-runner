@@ -2,10 +2,10 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
-# PROBE ONLY: push-triggered, fixed payload for test PR open-vela/external#2 (wshzhn).
+# PROBE ONLY (trunk): push-triggered, fixed payload, no Jenkins.
 on:
   push:
-    branches: [ci/explicit-tasks-probe]
+    branches: [ci/probe-trunk]
   workflow_dispatch: {}
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: '{"org":"open-vela","repo":"external","pr_id":"2","pr_branch":"dev","manifest_url":"https://gitee.com/open-vela/manifests.git","repo_http_url":"https://gitee.com/open-vela/external.git","pr_description":""}'
+          CLIENT_PAYLOAD: "{\"org\": \"open-vela\", \"repo\": \"nuttx\", \"pr_id\": \"0\", \"pr_branch\": \"trunk\", \"manifest_url\": \"https://gitee.com/open-vela/manifests.git\", \"repo_http_url\": \"https://gitee.com/open-vela/nuttx.git\", \"pr_description\": \"\"}"
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
@@ -355,12 +355,6 @@ jobs:
             ln -s /tools/riscv-none-elf-gcc "$tc"
             "$tc/bin/riscv-none-elf-gcc" --version | head -1 | grep -q xPack
           '
-
-      # PROBE ONLY: evidence that the test PR was cherry-picked.
-      - name: "PROBE: check test PR is applied"
-        run: |
-          git -C external log --oneline -3
-          test -f external/GITEE_CI_E2E_TEST.md && cat external/GITEE_CI_E2E_TEST.md
 
       - name: Build tasks
         env:
