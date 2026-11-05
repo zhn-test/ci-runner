@@ -2,10 +2,10 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
-# PROBE ONLY (deps): push-triggered, fixed payload, no Jenkins.
+# PROBE ONLY (fix: comma depends-on + manifest PR): push-triggered, fixed payload, no Jenkins.
 on:
   push:
-    branches: [ci/probe-deps]
+    branches: [ci/probe-fix]
   workflow_dispatch: {}
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: "{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_branch\": \"dev\", \"manifest_url\": \"https://gitee.com/open-vela/manifests.git\", \"repo_http_url\": \"https://gitee.com/open-vela/external.git\", \"pr_description\": \"Gitee CI e2e test.\\n\\ndepends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4 https://gitee.com/open-vela/manifests/pulls/10]\"}"
+          CLIENT_PAYLOAD: "{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_branch\": \"dev\", \"manifest_url\": \"https://gitee.com/open-vela/manifests.git\", \"repo_http_url\": \"https://gitee.com/open-vela/external.git\", \"pr_description\": \"Gitee CI e2e test.\\n\\ndepends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]\"}"
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
@@ -56,6 +56,7 @@ jobs:
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
           CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
           DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          DEPENDS=${DEPENDS//,/ }  # accept both "a, b" and "a b"
           PR_LIST="$CURRENT_PR $DEPENDS"
           PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
 
@@ -88,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")
+          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH" | python3 -c 'import json,sys;m=json.load(sys.stdin);m["include"]=[e for e in m["include"] if e["group"] in ("goldfish","ntfc-sim")];print(json.dumps(m))')  # PROBE
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
           python3 tools/ci/tasks.py drift --branch "$PR_BRANCH" || true
 
@@ -131,6 +132,25 @@ jobs:
         run: |
           repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
+
+      # The snapshot below freezes the manifest every ci-tasks job syncs from,
+      # so a manifest PR has to be applied before it is generated.
+      - name: Apply manifest PR
+        env:
+          ALL_PR: ${{ needs.parse.outputs.all_pr }}
+        run: |
+          set -euo pipefail
+          for PR_INFO in $ALL_PR; do
+            REPO_FULL_PATH=${PR_INFO%%:*}
+            PR_NUMBER=${PR_INFO##*:}
+            [ "${REPO_FULL_PATH#*/}" = manifests ] && [ "$PR_NUMBER" != 0 ] || continue
+            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
+              fetch origin "pull/$PR_NUMBER/head:manifest-pr"
+            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
+              cherry-pick $(git -C .repo/manifests rev-list --reverse HEAD..manifest-pr)
+            repo sync -c -d --no-tags --force-sync --no-manifest-update -j$(nproc)
+            echo "Applied manifest PR #$PR_NUMBER"
+          done
 
       - name: Generate snapshot and PR info
         id: snapshot
@@ -306,11 +326,7 @@ jobs:
             fi
 
             if [ "$PROJECT_NAME" = "manifests" ]; then
-              cd .repo/manifests
-              git fetch origin "pull/$PR_NUMBER/head:pr-branch"
-              git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
-              cd -
-              repo sync -c -d --no-tags --force-sync -j$(nproc)
+              echo "manifests PR #$PR_NUMBER is already in the snapshot"
             else
               REPO_NAME=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
               REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'path="' '{print $2}' | awk -F'"' '{print $1}')
@@ -365,16 +381,6 @@ jobs:
           git -C .repo/manifests log --oneline -2 || true
           grep -n CI_E2E_MANIFEST_MARKER .repo/manifests/*.xml .repo/manifest.xml 2>/dev/null || echo "PROBE-RESULT marker not in active manifest files"
 
-      # PROBE ONLY: make ntfc-sim's NTFC runtime hang past a shortened step timeout.
-      - name: "PROBE: inject NTFC hang"
-        if: ${{ matrix.group == 'ntfc-sim' }}
-        run: |
-          cd nuttx
-          f=boards/sim/sim/sim/configs/citest/run.sh
-          printf '#!/bin/bash\nmkdir -p nuttx/result\necho partial > nuttx/result/partial.log\necho "PROBE: injected NTFC hang"\nsleep 1800\n' > "$f"
-          chmod +x "$f"
-          git -c user.name=probe -c user.email=probe@example.invalid commit -qam "PROBE: inject NTFC hang"
-
       - name: Build tasks
         env:
           CI_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
@@ -386,7 +392,7 @@ jobs:
       # is an ordinary failure, so collection and upload below still run.
       - name: Run NTFC runtime tests
         if: ${{ matrix.ntfc }}
-        timeout-minutes: ${{ matrix.group == 'ntfc-sim' && 6 || 130 }}  # PROBE
+        timeout-minutes: 130
         env:
           NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
