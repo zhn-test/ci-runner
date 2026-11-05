@@ -14,355 +14,75 @@ jobs:
           persist-credentials: false
       - name: Logic cases
         run: |
-          set -uo pipefail
           fail=0
           echo "=== case none"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Plain description\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS none: rc=$rc all_pr=[$got]"; else echo "FAIL none: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
           echo "=== case space"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4 https://gitee.com/open-vela/manifests/pulls/10]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS space: rc=$rc all_pr=[$got]"; else echo "FAIL space: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case comma"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS comma: rc=$rc all_pr=[$got]"; else echo "FAIL comma: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case uppercase"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Depends-On: [https://gitee.com/open-vela/nuttx-apps/pulls/4]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS uppercase: rc=$rc all_pr=[$got]"; else echo "FAIL uppercase: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case dup-self"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/external/pulls/2]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS dup-self: rc=$rc all_pr=[$got]"; else echo "FAIL dup-self: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
           echo "=== case trailing-slash"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4/]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS trailing-slash: rc=$rc all_pr=[$got]"; else echo "FAIL trailing-slash: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case github-url"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://github.com/open-vela/nuttx-apps/pull/4]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS github-url: rc=$rc all_pr=[$got]"; else echo "FAIL github-url: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case cross-org"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/someone/manifests/pulls/9]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS cross-org: rc=$rc all_pr=[$got]"; else echo "FAIL cross-org: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case unclosed"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: https://gitee.com/open-vela/nuttx-apps/pulls/4\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS unclosed: rc=$rc all_pr=[$got]"; else echo "FAIL unclosed: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case injection"
           export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/x/pulls/1;touch${IFS}/tmp/pwn]\"}"
-          export GITHUB_OUTPUT=$(mktemp)
-          ORG=open-vela; REPO=external; PR_ID=2
-          ( set -e
-          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
-          # that cannot be used fails here rather than being silently skipped.
-          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
-          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
-          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
-            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
-            exit 1
-          fi
-          ALL_PR="$ORG/$REPO:$PR_ID"
-          for url in ${DEPENDS//,/ }; do
-            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
-              echo "::error::Invalid depends-on entry: $url"
-              exit 1
-            fi
-            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
-              echo "::error::Cross-organization dependencies are forbidden: $url"
-              exit 1
-            fi
-            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
-            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
-          done
-          # manifests first: setup applies them before generating the snapshot.
-          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
-                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
-          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
+          bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS injection: rc=$rc all_pr=[$got]"; else echo "FAIL injection: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           [ ! -e /tmp/pwn ] || { echo "FAIL injection executed"; fail=1; }
-          echo "=== manifest path lookup"; mkdir -p .repo/manifests
+          mkdir -p .repo/manifests
           printf '%s\n' '<manifest>' '  <project path="apps" name="nuttx-apps"/>' '  <project name="external" path="external"/>' '  <project name="docs"/>' '  <project path="external/json-c/json-c" name="external_json-c"/>' '</manifest>' > .repo/manifests/openvela.xml
           for want in nuttx-apps:apps:0 external:external:0 docs:docs:0 external_json-c:external/json-c/json-c:0 missing::1; do
-            PROJECT_NAME=${want%%:*}; exp=$(echo $want|cut -d: -f2); erc=${want##*:}; REPO_FULL_PATH=open-vela/$PROJECT_NAME; PR_NUMBER=1
-            ( set -e
-            line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | head -1 || true)
-                REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
-                [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
-                if [ -z "$REPO_PATH" ]; then
-                  echo "::error::$REPO_FULL_PATH is not in the manifest, so PR #$PR_NUMBER cannot be built"
-                  exit 1
-                fi
-            echo "$REPO_PATH" ) > /tmp/p.out 2>&1; rc=$?; got=$(tail -1 /tmp/p.out)
+            export PROJECT_NAME=${want%%:*} REPO_FULL_PATH=open-vela/${want%%:*} PR_NUMBER=1; exp=$(echo $want|cut -d: -f2); erc=${want##*:}
+            got=$(bash tools/ci/probe_path.sh 2>&1 | tail -1); rc=${PIPESTATUS[0]}; bash tools/ci/probe_path.sh >/dev/null 2>&1; rc=$?
             if { [ $rc = 0 ] && [ $erc = 0 ] && [ "$got" = "$exp" ]; } || { [ $rc != 0 ] && [ $erc = 1 ]; }; then echo "PASS path $PROJECT_NAME -> [$got] rc=$rc"; else echo "FAIL path $PROJECT_NAME -> [$got] rc=$rc"; fail=1; fi
           done
-          echo "=== tasks.py"; python3 -c "import yaml" 2>/dev/null || pip install -q pyyaml
           python3 tools/ci/tasks.py matrix --branch jyliu > /dev/null 2>&1 && { echo "FAIL unknown branch accepted"; fail=1; } || echo "PASS unknown branch rejected"
           for b in dev dev-ai-contest-2026 trunk rebase_dev_trunk_55; do python3 tools/ci/tasks.py matrix --branch $b > /dev/null && echo "PASS branch $b" || { echo "FAIL branch $b"; fail=1; }; done
           exit $fail
