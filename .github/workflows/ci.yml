@@ -54,6 +54,7 @@ jobs:
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
           CURRENT_PR="https://gitee.com/$ORG/$REPO/pulls/$PR_ID"
           DEPENDS=$(grep -oP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          DEPENDS=${DEPENDS//,/ }  # accept both "a, b" and "a b"
           PR_LIST="$CURRENT_PR $DEPENDS"
           PR_LIST=$(echo $PR_LIST | awk '{for(i=1;i<=NF;i++) if(!a[$i]++) printf "%s%s",$i,(i==NF?ORS:OFS)}')
 
@@ -129,6 +130,25 @@ jobs:
         run: |
           repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
           repo sync -c -d --no-tags --force-sync -j$(nproc)
+
+      # The snapshot below freezes the manifest every ci-tasks job syncs from,
+      # so a manifest PR has to be applied before it is generated.
+      - name: Apply manifest PR
+        env:
+          ALL_PR: ${{ needs.parse.outputs.all_pr }}
+        run: |
+          set -euo pipefail
+          for PR_INFO in $ALL_PR; do
+            REPO_FULL_PATH=${PR_INFO%%:*}
+            PR_NUMBER=${PR_INFO##*:}
+            [ "${REPO_FULL_PATH#*/}" = manifests ] && [ "$PR_NUMBER" != 0 ] || continue
+            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
+              fetch origin "pull/$PR_NUMBER/head:manifest-pr"
+            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
+              cherry-pick $(git -C .repo/manifests rev-list --reverse HEAD..manifest-pr)
+            repo sync -c -d --no-tags --force-sync --no-manifest-update -j$(nproc)
+            echo "Applied manifest PR #$PR_NUMBER"
+          done
 
       - name: Generate snapshot and PR info
         id: snapshot
@@ -304,11 +324,7 @@ jobs:
             fi
 
             if [ "$PROJECT_NAME" = "manifests" ]; then
-              cd .repo/manifests
-              git fetch origin "pull/$PR_NUMBER/head:pr-branch"
-              git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
-              cd -
-              repo sync -c -d --no-tags --force-sync -j$(nproc)
+              echo "manifests PR #$PR_NUMBER is already in the snapshot"
             else
               REPO_NAME=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'name="' '{print $2}' | awk -F'"' '{print $1}')
               REPO_PATH=$(grep "\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | awk -F'path="' '{print $2}' | awk -F'"' '{print $1}')
