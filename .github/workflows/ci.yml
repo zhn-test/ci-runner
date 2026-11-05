@@ -1,55 +1,26 @@
-# .github/workflows/ci.yml
-# Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
-
+# PROBE ONLY (logic): run the real parse and manifest-path snippets of ci.yml.
 on:
-  repository_dispatch:
-    types: [gitee-pr-ci]
-
+  push:
+    branches: [ci/probe-logic]
 permissions:
   contents: read
-
 jobs:
-  # ============================================================
-  # Job 1: Parse payload + fetch matrix
-  # ============================================================
-  parse:
+  logic:
     runs-on: ubuntu-24.04
-    outputs:
-      org: ${{ steps.p.outputs.org }}
-      repo: ${{ steps.p.outputs.repo }}
-      pr_id: ${{ steps.p.outputs.pr_id }}
-      pr_branch: ${{ steps.p.outputs.pr_branch }}
-      manifest_url: ${{ steps.p.outputs.manifest_url }}
-      repo_http_url: ${{ steps.p.outputs.repo_http_url }}
-      all_pr: ${{ steps.p.outputs.all_pr }}
-      matrix: ${{ steps.m.outputs.matrix }}
     steps:
-      - name: Parse and validate payload
-        id: p
-        env:
-          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Logic cases
         run: |
-          ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
-          REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
-          PR_ID=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_id // empty')
-          PR_BRANCH=$(echo "$CLIENT_PAYLOAD" | jq -r '.pr_branch // empty')
-
-          for field in org repo pr_id pr_branch; do
-            val=$(echo "$CLIENT_PAYLOAD" | jq -r ".$field // empty")
-            if [ -z "$val" ]; then
-              echo "::error::Missing required field: $field"
-              exit 1
-            fi
-          done
-
-          echo "org=$ORG" >> $GITHUB_OUTPUT
-          echo "repo=$REPO" >> $GITHUB_OUTPUT
-          echo "pr_id=$PR_ID" >> $GITHUB_OUTPUT
-          echo "pr_branch=$PR_BRANCH" >> $GITHUB_OUTPUT
-          echo "manifest_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.manifest_url // empty')" >> $GITHUB_OUTPUT
-          echo "repo_http_url=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo_http_url // empty')" >> $GITHUB_OUTPUT
-
+          set -uo pipefail
+          fail=0
+          echo "=== case none"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Plain description\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
           # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
           # that cannot be used fails here rather than being silently skipped.
           echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
@@ -75,377 +46,323 @@ jobs:
           ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
                      printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
           echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
-
-      # The task list is maintained in tools/ci/tasks.yml, not read from
-      # public-actions. The drift check only warns.
-      - name: Checkout CI scripts
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Select task set
-        id: m
-        env:
-          PR_BRANCH: ${{ steps.p.outputs.pr_branch }}
-          REPO: ${{ steps.p.outputs.repo }}
-        run: |
-          set -euo pipefail
-          if [ "$REPO" = docs ]; then
-            # setup and ci-tasks are skipped for docs; this placeholder is never expanded.
-            echo 'matrix={"include":[{"group":"docs"}]}' >> "$GITHUB_OUTPUT"
-            echo "docs repository: no build tasks"
-            exit 0
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS none: rc=$rc all_pr=[$got]"; else echo "FAIL none: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
+          echo "=== case space"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4 https://gitee.com/open-vela/manifests/pulls/10]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
           fi
-          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")
-          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
-          python3 tools/ci/tasks.py drift --branch "$PR_BRANCH" || true
-
-  # ============================================================
-  # Job 3: Setup - repo sync, record PR info, generate snapshot
-  #         (NO cherry-pick here - done in each ci-tasks group)
-  # ============================================================
-  setup:
-    needs: [parse]
-    if: needs.parse.outputs.repo != 'docs'
-    runs-on: ubuntu-24.04
-    outputs:
-      snapshot: ${{ steps.snapshot.outputs.name }}
-    steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq jq
-          sudo curl -s -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-          sudo chmod a+x /usr/local/bin/repo
-
-      - name: Clean up disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
-            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
-            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
-            /usr/local/lib/node_modules /opt/pipx /imagegeneration
-          sudo docker image prune --all --force 2>/dev/null || true
-          df -h
-
-      - name: Repo Init and Sync
-        env:
-          PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
-          MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
-        run: |
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
-          repo sync -c -d --no-tags --force-sync -j$(nproc)
-
-      # The snapshot below freezes the manifest every ci-tasks job syncs from,
-      # so a manifest PR has to be applied before it is generated.
-      - name: Apply manifest PR
-        env:
-          ALL_PR: ${{ needs.parse.outputs.all_pr }}
-        run: |
-          set -euo pipefail
-          for PR_INFO in $ALL_PR; do
-            REPO_FULL_PATH=${PR_INFO%%:*}
-            PR_NUMBER=${PR_INFO##*:}
-            [ "${REPO_FULL_PATH#*/}" = manifests ] && [ "$PR_NUMBER" != 0 ] || continue
-            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
-              fetch origin "pull/$PR_NUMBER/head:manifest-pr"
-            git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
-              cherry-pick $(git -C .repo/manifests rev-list --reverse HEAD..manifest-pr)
-            repo sync -c -d --no-tags --force-sync --no-manifest-update -j$(nproc)
-            echo "Applied manifest PR #$PR_NUMBER"
-          done
-
-      - name: Generate snapshot and PR info
-        id: snapshot
-        env:
-          ALL_PR: ${{ needs.parse.outputs.all_pr }}
-          ORG: ${{ needs.parse.outputs.org }}
-          REPO: ${{ needs.parse.outputs.repo }}
-          PR_ID: ${{ needs.parse.outputs.pr_id }}
-        run: |
-          SNAPSHOT_NAME="snapshot_${ORG}_${REPO}_${PR_ID}"
-          PR_INFO_FILE="pr_info_${ORG}_${REPO}_${PR_ID}"
-
-          # Generate snapshot (frozen manifest with exact commit SHAs)
-          repo manifest -r -o "$SNAPSHOT_NAME"
-
-          # Record PR commit info for each dependency
-          # Format: repo_name:commit_sha (one per line)
-          for PR_INFO in $ALL_PR; do
-            REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
-            PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
-            PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
-
-            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
-              continue
-            fi
-
-            if [ "$PROJECT_NAME" = "manifests" ]; then
-              cd .repo/manifests
-              git fetch origin "pull/$PR_NUMBER/head:pr-branch"
-              LATEST_SHA=$(git rev-parse pr-branch)
-              cd -
-            else
-              line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | head -1 || true)
-              REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
-              [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
-              if [ -z "$REPO_PATH" ]; then
-                echo "::error::$REPO_FULL_PATH is not in the manifest, so PR #$PR_NUMBER cannot be built"
-                exit 1
-              fi
-              cd "$REPO_PATH"
-              git fetch "https://gitee.com/$REPO_FULL_PATH.git" "pull/$PR_NUMBER/head:pr-branch"
-              LATEST_SHA=$(git rev-parse pr-branch)
-              cd -
-            fi
-            echo "${REPO_FULL_PATH}:${PR_NUMBER}:${LATEST_SHA}" >> "$PR_INFO_FILE"
-            echo "Recorded: ${REPO_FULL_PATH} PR#${PR_NUMBER} SHA=${LATEST_SHA}"
-          done
-
-          # Create empty PR_INFO_FILE if no PRs
-          touch "$PR_INFO_FILE"
-
-          echo "name=$SNAPSHOT_NAME" >> $GITHUB_OUTPUT
-          echo "pr_info=$PR_INFO_FILE" >> $GITHUB_OUTPUT
-
-      - name: Upload snapshot and PR info
-        uses: actions/upload-artifact@v4
-        with:
-          name: source_info
-          path: |
-            ${{ steps.snapshot.outputs.name }}
-            pr_info_*
-
-  # ============================================================
-  # Job 4: CI tasks - parallel by group, cherry-pick + Docker build
-  # ============================================================
-  ci-tasks:
-    name: ci-tasks (${{ matrix.group }})
-    needs: [parse, setup]
-    if: needs.parse.outputs.repo != 'docs'
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.ntfc && 180 || 360 }}
-    env:
-      CI_IMAGE: ghcr.io/open-vela/openvela-ci-linux_from_apache-nuttx:latest
-    strategy:
-      matrix: ${{ fromJSON(needs.parse.outputs.matrix) }}
-      fail-fast: false
-    outputs:
-      status: ${{ steps.check.outputs.status }}
-    steps:
-      - name: Checkout CI scripts
-        uses: actions/checkout@v4
-        with:
-          path: .ci-runner
-          persist-credentials: false
-
-      - name: Download snapshot and PR info
-        uses: actions/download-artifact@v4
-        with:
-          name: source_info
-
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Extra cleanup
-        run: |
-          sudo rm -rf /usr/local/share/chromium /usr/local/share/powershell \
-            /usr/share/swift /usr/share/miniconda /usr/share/kotlinc \
-            /usr/share/gradle-* /usr/share/sbt /usr/local/julia* \
-            /usr/local/lib/node_modules /opt/pipx /imagegeneration
-          df -h
-
-      - name: Install repo
-        run: |
-          mkdir ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Repo Init and Sync from snapshot
-        env:
-          PR_BRANCH: ${{ needs.parse.outputs.pr_branch }}
-          MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
-          SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
-        run: |
-          # Save snapshot and pr_info before repo init overwrites workspace
-          cp "$SNAPSHOT_FILE" /tmp/ 2>/dev/null || true
-          cp pr_info_* /tmp/ 2>/dev/null || true
-
-          repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
-
-          # Copy snapshot into manifests and re-init with it
-          cp "/tmp/$SNAPSHOT_FILE" .repo/manifests/
-          echo "Re-init with snapshot: $SNAPSHOT_FILE"
-          repo init -m "$SNAPSHOT_FILE" --group=default,platform-linux --depth=1 --git-lfs
-
-          # Verify snapshot is active
-          ACTIVE_MANIFEST=$(readlink -f .repo/manifest.xml 2>/dev/null || echo "unknown")
-          echo "Active manifest: $ACTIVE_MANIFEST"
-          echo "Snapshot file exists in manifests: $(ls -la .repo/manifests/$SNAPSHOT_FILE 2>/dev/null || echo 'NOT FOUND')"
-          echo "First 3 projects in active manifest:"
-          head -20 .repo/manifest.xml 2>/dev/null | grep '<project' | head -3
-
-          repo sync -c -d --no-tags --force-sync -j$(nproc)
-
-          # Restore pr_info for cherry-pick step
-          cp /tmp/pr_info_* . 2>/dev/null || true
-          df -h
-
-      - name: Cherry-pick PRs
-        env:
-          ALL_PR: ${{ needs.parse.outputs.all_pr }}
-          SNAPSHOT_FILE: ${{ needs.setup.outputs.snapshot }}
-        run: |
-          git config --global user.email "openvela-robot@xiaomi.com"
-          git config --global user.name "openvela-robot"
-
-          PR_INFO_FILE=$(ls pr_info_* 2>/dev/null | head -1)
-          if [ -z "$PR_INFO_FILE" ] || [ ! -s "$PR_INFO_FILE" ]; then
-            echo "No PRs to cherry-pick"
-            exit 0
-          fi
-
-          for PR_INFO in $ALL_PR; do
-            REPO_FULL_PATH=$(echo "$PR_INFO" | cut -d ':' -f 1 | xargs)
-            PR_NUMBER=$(echo "$PR_INFO" | cut -d ':' -f 2)
-            PROJECT_NAME=$(echo "$REPO_FULL_PATH" | cut -d '/' -f 2)
-
-            if [ "$PR_NUMBER" = "0" ] || [ "$REPO_FULL_PATH" = "none/none" ] || [ -z "$PR_NUMBER" ]; then
-              continue
-            fi
-
-            # Get commit SHA from PR info file
-            PR_COMMIT=$(grep "^${REPO_FULL_PATH}:" "$PR_INFO_FILE" | awk -F':' '{print $3}')
-            if [ -z "$PR_COMMIT" ]; then
-              echo "::error::No recorded commit for $REPO_FULL_PATH PR #$PR_NUMBER"
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
               exit 1
             fi
-
-            if [ "$PROJECT_NAME" = "manifests" ]; then
-              echo "manifests PR #$PR_NUMBER is already in the snapshot"
-            else
-              line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" ".repo/manifests/$SNAPSHOT_FILE" | head -1 || true)
-              REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
-              [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
-              if [ -z "$REPO_PATH" ]; then
-                echo "::error::$REPO_FULL_PATH is not in the snapshot, so PR #$PR_NUMBER cannot be built"
-                exit 1
-              fi
-              cd "$REPO_PATH"
-              git fetch openvela "pull/$PR_NUMBER/head:pr-branch"
-              git cherry-pick $(git rev-list --reverse HEAD..$PR_COMMIT)
-              cd -
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
             fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
           done
-
-      - name: Docker Login
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Docker Pull
-        run: docker pull "$CI_IMAGE"
-
-      - name: Clean up after Docker pull
-        run: |
-          sudo apt-get clean
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          sudo docker builder prune -a 2>/dev/null || true
-          df -h
-
-      # Same swap as public-actions ci-real.yml: the manifest GCC cannot link rv64.
-      - name: Use Apache xPack RISC-V toolchain
-        if: ${{ matrix.toolchain == 'riscv-xpack' }}
-        run: |
-          docker run --rm -v "$(pwd)":/workspace -w /workspace "$CI_IMAGE" /bin/bash -c '
-            set -e
-            tc=/workspace/prebuilts/gcc/linux-x86_64/riscv-none-elf
-            riscv-none-elf-gcc --version | head -1
-            mv "$tc" "$tc.manifest"
-            ln -s /tools/riscv-none-elf-gcc "$tc"
-            "$tc/bin/riscv-none-elf-gcc" --version | head -1 | grep -q xPack
-          '
-
-      - name: Build tasks
-        env:
-          CI_TRIGGER_REPO: ${{ needs.parse.outputs.repo }}
-          CI_PR_NUMBER: ${{ needs.parse.outputs.pr_id }}
-          TASKS: ${{ matrix.tasks }}
-        run: bash .ci-runner/tools/ci/build_tasks.sh "${{ matrix.group }}" "$TASKS"
-
-      # Own step and timeout, as in public-actions ci-real.yml: a step timeout
-      # is an ordinary failure, so collection and upload below still run.
-      - name: Run NTFC runtime tests
-        if: ${{ matrix.ntfc }}
-        timeout-minutes: 130
-        env:
-          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          while IFS='=' read -r k v; do export "$k=$v"; done < <(python3 .ci-runner/tools/ci/tasks.py env)
-          if [ -z "${NTFC_TASK:-}" ] || [ -z "${NTFC_ARTIFACT:-}" ]; then
-            echo "::error::the ntfc group built no task that set NTFC_TASK"
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS space: rc=$rc all_pr=[$got]"; else echo "FAIL space: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
+          echo "=== case comma"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
             exit 1
           fi
-          board="${NTFC_TASK%%:*}" config="${NTFC_TASK##*:}"
-          cfgdir=$(ls -d nuttx/boards/*/*/"$board"/configs/"$config" 2>/dev/null | head -1 || true)
-          if [ -z "$cfgdir" ] || [ ! -f "$cfgdir/config.yaml" ] || [ ! -x "$cfgdir/run.sh" ]; then
-            echo "::error::$NTFC_TASK needs config.yaml and an executable run.sh"
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS comma: rc=$rc all_pr=[$got]"; else echo "FAIL comma: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
+          echo "=== case uppercase"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Depends-On: [https://gitee.com/open-vela/nuttx-apps/pulls/4]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
             exit 1
           fi
-          docker run --name "$NTFC_CONTAINER" -v "$(pwd)":/workspace -w /workspace \
-            -e NTFCDIR=/workspace/.ntfc \
-            -e CURRENTCONFDIR="/workspace/$cfgdir" \
-            -e ARTIFACTCONFDIR="/workspace/$NTFC_ARTIFACT" \
-            "$CI_IMAGE" /bin/bash -c "set -e && \
-              python3 -m venv /workspace/.ntfc-venv && \
-              /workspace/.ntfc-venv/bin/pip install --quiet '$NTFC_SPEC' '$PYTEST_SPEC' && \
-              export PATH=/workspace/.ntfc-venv/bin:\$PATH && ntfc --help > /dev/null && \
-              rm -rf /workspace/.ntfc && mkdir -p /workspace/.ntfc/external && \
-              git clone --depth=1 --branch '$NTFC_TESTING_REF' '$NTFC_TESTING_REPO' \
-                /workspace/.ntfc/external/nuttx-testing && \
-              cp -a $NTFC_ARTIFACT/. nuttx/ && \
-              mkdir -p nuttx/build && cp -a $NTFC_ARTIFACT/. nuttx/build/ && \
-              bash /workspace/$cfgdir/run.sh"
-
-      # run.sh moves its results only after ntfc returns; recover them on a
-      # failure or timeout and always remove the named container.
-      - name: Collect NTFC diagnostics
-        if: ${{ always() && matrix.ntfc }}
-        env:
-          NTFC_CONTAINER: ntfc-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          docker rm -f "$NTFC_CONTAINER" 2>/dev/null || true
-          [ -n "${NTFC_ARTIFACT:-}" ] || exit 0
-          dest="$NTFC_ARTIFACT/ntfc"
-          mkdir -p "$dest"
-          [ -d nuttx/result ] && sudo mv nuttx/result "$dest/"
-          [ -f nuttx/pytest.debug.log ] && sudo mv nuttx/pytest.debug.log "$dest/"
-          sudo chown -R "$(id -u):$(id -g)" "$dest"
-          echo "collected $(find "$dest" -type f | wc -l) file(s)"
-
-      - name: Archive CI Build Package
-        if: ${{ success() || (!cancelled() && matrix.ntfc) }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build_Package_${{ matrix.group }}
-          path: ${{ matrix.group }}
-          include-hidden-files: true  # keep .config
-
-      - name: Check status
-        id: check
-        if: always()
-        run: echo "status=${{ job.status }}" >> $GITHUB_OUTPUT
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS uppercase: rc=$rc all_pr=[$got]"; else echo "FAIL uppercase: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
+          echo "=== case dup-self"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/external/pulls/2]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS dup-self: rc=$rc all_pr=[$got]"; else echo "FAIL dup-self: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
+          echo "=== case trailing-slash"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4/]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS trailing-slash: rc=$rc all_pr=[$got]"; else echo "FAIL trailing-slash: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
+          echo "=== case github-url"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://github.com/open-vela/nuttx-apps/pull/4]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS github-url: rc=$rc all_pr=[$got]"; else echo "FAIL github-url: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
+          echo "=== case cross-org"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/someone/manifests/pulls/9]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS cross-org: rc=$rc all_pr=[$got]"; else echo "FAIL cross-org: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
+          echo "=== case unclosed"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: https://gitee.com/open-vela/nuttx-apps/pulls/4\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS unclosed: rc=$rc all_pr=[$got]"; else echo "FAIL unclosed: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
+          echo "=== case injection"
+          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/x/pulls/1;touch${IFS}/tmp/pwn]\"}"
+          export GITHUB_OUTPUT=$(mktemp)
+          ORG=open-vela; REPO=external; PR_ID=2
+          ( set -e
+          # Parse depends-on. Every entry must be an open-vela Gitee PR URL; one
+          # that cannot be used fails here rather than being silently skipped.
+          echo "$CLIENT_PAYLOAD" | jq -r '.pr_description // empty' > /tmp/pr_desc.txt
+          DEPENDS=$(grep -ioP 'depends-on:\s*\[[^]]+\]' /tmp/pr_desc.txt 2>/dev/null | grep -oP '(?<=\[)[^]]+(?=\])' || true)
+          if [ -z "$DEPENDS" ] && grep -qi 'depends-on' /tmp/pr_desc.txt; then
+            echo "::error::Malformed depends-on; expected: depends-on: [https://gitee.com/open-vela/<repo>/pulls/<N>, ...]"
+            exit 1
+          fi
+          ALL_PR="$ORG/$REPO:$PR_ID"
+          for url in ${DEPENDS//,/ }; do
+            if [[ ! "$url" =~ ^https://gitee\.com/([A-Za-z0-9_-]+/[A-Za-z0-9_.-]+)/pulls/([0-9]+)$ ]]; then
+              echo "::error::Invalid depends-on entry: $url"
+              exit 1
+            fi
+            if [[ "${BASH_REMATCH[1]}" != open-vela/* ]]; then
+              echo "::error::Cross-organization dependencies are forbidden: $url"
+              exit 1
+            fi
+            pair="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+            [[ " $ALL_PR " == *" $pair "* ]] || ALL_PR="$ALL_PR $pair"
+          done
+          # manifests first: setup applies them before generating the snapshot.
+          ALL_PR=$({ printf '%s\n' $ALL_PR | grep '^open-vela/manifests:' || true
+                     printf '%s\n' $ALL_PR | grep -v '^open-vela/manifests:' || true; } | xargs)
+          echo "all_pr=$ALL_PR" >> $GITHUB_OUTPUT
+          ) > /tmp/case.log 2>&1; rc=$?; cat /tmp/case.log
+          got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
+          r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS injection: rc=$rc all_pr=[$got]"; else echo "FAIL injection: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
+          [ ! -e /tmp/pwn ] || { echo "FAIL injection executed"; fail=1; }
+          echo "=== manifest path lookup"; mkdir -p .repo/manifests
+          printf '%s\n' '<manifest>' '  <project path="apps" name="nuttx-apps"/>' '  <project name="external" path="external"/>' '  <project name="docs"/>' '  <project path="external/json-c/json-c" name="external_json-c"/>' '</manifest>' > .repo/manifests/openvela.xml
+          for want in nuttx-apps:apps:0 external:external:0 docs:docs:0 external_json-c:external/json-c/json-c:0 missing::1; do
+            PROJECT_NAME=${want%%:*}; exp=$(echo $want|cut -d: -f2); erc=${want##*:}; REPO_FULL_PATH=open-vela/$PROJECT_NAME; PR_NUMBER=1
+            ( set -e
+            line=$(grep -E "<project [^>]*name=\"$PROJECT_NAME\"" .repo/manifests/openvela.xml | head -1 || true)
+                REPO_PATH=$(sed -n 's/.*path="\([^"]*\)".*/\1/p' <<< "$line")
+                [ -n "$REPO_PATH" ] || REPO_PATH=$(sed -n 's/.*name="\([^"]*\)".*/\1/p' <<< "$line")
+                if [ -z "$REPO_PATH" ]; then
+                  echo "::error::$REPO_FULL_PATH is not in the manifest, so PR #$PR_NUMBER cannot be built"
+                  exit 1
+                fi
+            echo "$REPO_PATH" ) > /tmp/p.out 2>&1; rc=$?; got=$(tail -1 /tmp/p.out)
+            if { [ $rc = 0 ] && [ $erc = 0 ] && [ "$got" = "$exp" ]; } || { [ $rc != 0 ] && [ $erc = 1 ]; }; then echo "PASS path $PROJECT_NAME -> [$got] rc=$rc"; else echo "FAIL path $PROJECT_NAME -> [$got] rc=$rc"; fail=1; fi
+          done
+          echo "=== tasks.py"; python3 -c "import yaml" 2>/dev/null || pip install -q pyyaml
+          python3 tools/ci/tasks.py matrix --branch jyliu > /dev/null 2>&1 && { echo "FAIL unknown branch accepted"; fail=1; } || echo "PASS unknown branch rejected"
+          for b in dev dev-ai-contest-2026 trunk rebase_dev_trunk_55; do python3 tools/ci/tasks.py matrix --branch $b > /dev/null && echo "PASS branch $b" || { echo "FAIL branch $b"; fail=1; }; done
+          exit $fail
