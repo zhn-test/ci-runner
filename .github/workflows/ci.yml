@@ -2,9 +2,10 @@
 # Security: No Gitee credentials on GitHub side.
 name: Gitee CI/CT
 
+# PROBE ONLY: push-triggered, fixed payload, no Jenkins.
 on:
-  repository_dispatch:
-    types: [gitee-pr-ci]
+  push:
+    branches: [ci/probe-fix2]
 
 permissions:
   contents: read
@@ -28,7 +29,7 @@ jobs:
       - name: Parse and validate payload
         id: p
         env:
-          CLIENT_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          CLIENT_PAYLOAD: "{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_branch\": \"dev\", \"manifest_url\": \"https://gitee.com/open-vela/manifests.git\", \"repo_http_url\": \"https://gitee.com/open-vela/external.git\", \"pr_description\": \"Gitee CI e2e test.\\n\\nDepends-On: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]\"}"
         run: |
           ORG=$(echo "$CLIENT_PAYLOAD" | jq -r '.org // empty')
           REPO=$(echo "$CLIENT_PAYLOAD" | jq -r '.repo // empty')
@@ -97,7 +98,7 @@ jobs:
             exit 0
           fi
           python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
-          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH")
+          matrix=$(python3 tools/ci/tasks.py matrix --branch "$PR_BRANCH" | python3 -c 'import json,sys;m=json.load(sys.stdin);m["include"]=[e for e in m["include"] if e["group"] in ["goldfish", "ntfc-sim"]];print(json.dumps(m))')  # PROBE
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
           python3 tools/ci/tasks.py drift --branch "$PR_BRANCH" || true
 
@@ -378,6 +379,12 @@ jobs:
             ln -s /tools/riscv-none-elf-gcc "$tc"
             "$tc/bin/riscv-none-elf-gcc" --version | head -1 | grep -q xPack
           '
+
+      - name: "PROBE: check dependent PRs are applied"
+        run: |
+          for f in external/GITEE_CI_E2E_TEST.md apps/GITEE_CI_E2E_TEST.md CI_E2E_MANIFEST_MARKER.md; do
+            if [ -e "$f" ]; then echo "PROBE-RESULT present: $f"; else echo "PROBE-RESULT missing: $f"; fi
+          done
 
       - name: Build tasks
         env:
