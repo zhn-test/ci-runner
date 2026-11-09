@@ -17,61 +17,61 @@ jobs:
           set +e
           fail=0
           echo "=== case none"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Plain description\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "Plain description"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS none: rc=$rc all_pr=[$got]"; else echo "FAIL none: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
           echo "=== case space"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4 https://gitee.com/open-vela/manifests/pulls/10]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4 https://gitee.com/open-vela/manifests/pulls/10]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS space: rc=$rc all_pr=[$got]"; else echo "FAIL space: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case comma"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4, https://gitee.com/open-vela/manifests/pulls/10]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS comma: rc=$rc all_pr=[$got]"; else echo "FAIL comma: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/manifests:10 open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case uppercase"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"Depends-On: [https://gitee.com/open-vela/nuttx-apps/pulls/4]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "Depends-On: [https://gitee.com/open-vela/nuttx-apps/pulls/4]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2 open-vela/nuttx-apps:4" ]; then echo "PASS uppercase: rc=$rc all_pr=[$got]"; else echo "FAIL uppercase: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2 open-vela/nuttx-apps:4]"; fail=1; fi
           echo "=== case dup-self"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/external/pulls/2]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/open-vela/external/pulls/2]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 0 ] && [ "$got" = "open-vela/external:2" ]; then echo "PASS dup-self: rc=$rc all_pr=[$got]"; else echo "FAIL dup-self: rc=$rc all_pr=[$got] want rc=0 all_pr=[open-vela/external:2]"; fail=1; fi
           echo "=== case trailing-slash"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4/]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/open-vela/nuttx-apps/pulls/4/]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS trailing-slash: rc=$rc all_pr=[$got]"; else echo "FAIL trailing-slash: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case github-url"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://github.com/open-vela/nuttx-apps/pull/4]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://github.com/open-vela/nuttx-apps/pull/4]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS github-url: rc=$rc all_pr=[$got]"; else echo "FAIL github-url: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case cross-org"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/someone/manifests/pulls/9]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/someone/manifests/pulls/9]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS cross-org: rc=$rc all_pr=[$got]"; else echo "FAIL cross-org: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case unclosed"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: https://gitee.com/open-vela/nuttx-apps/pulls/4\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: https://gitee.com/open-vela/nuttx-apps/pulls/4"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
           r=0; [ "$rc" -eq 0 ] || r=1; if [ "$r" = 1 ] && [ "$got" = "" ]; then echo "PASS unclosed: rc=$rc all_pr=[$got]"; else echo "FAIL unclosed: rc=$rc all_pr=[$got] want rc=1 all_pr=[]"; fail=1; fi
           echo "=== case injection"
-          export CLIENT_PAYLOAD="{\"org\": \"open-vela\", \"repo\": \"external\", \"pr_id\": \"2\", \"pr_description\": \"depends-on: [https://gitee.com/open-vela/x/pulls/1;touch${IFS}/tmp/pwn]\"}"
+          export CLIENT_PAYLOAD='{"org": "open-vela", "repo": "external", "pr_id": "2", "pr_description": "depends-on: [https://gitee.com/open-vela/x/pulls/1;touch${IFS}/tmp/pwn]"}'
           export GITHUB_OUTPUT=$(mktemp) ORG=open-vela REPO=external PR_ID=2
           bash tools/ci/probe_parse.sh; rc=$?
           got=$(sed -n "s/^all_pr=//p" "$GITHUB_OUTPUT")
