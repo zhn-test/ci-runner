@@ -136,7 +136,8 @@ jobs:
           MANIFEST_URL: ${{ needs.parse.outputs.manifest_url }}
         run: |
           repo init -u "$MANIFEST_URL" -b "${PR_BRANCH:-trunk}" -m openvela.xml --group=default,platform-linux --depth=1 --git-lfs
-          repo sync -c -d --no-tags --force-sync -j$(nproc)
+          # Gitee drops connections now and then: retry each fetch, then the sync.
+          for i in 1 2; do repo sync -c -d --no-tags --force-sync --retry-fetches=5 -j$(nproc) && break; [ $i = 2 ] && exit 1; echo "repo sync failed, retrying"; sleep 30; done
 
       # The snapshot below freezes the manifest every ci-tasks job syncs from,
       # so a manifest PR has to be applied before it is generated.
@@ -153,7 +154,7 @@ jobs:
               fetch origin "pull/$PR_NUMBER/head:manifest-pr"
             git -C .repo/manifests -c user.email=openvela-robot@xiaomi.com -c user.name=openvela-robot \
               cherry-pick $(git -C .repo/manifests rev-list --reverse HEAD..manifest-pr)
-            repo sync -c -d --no-tags --force-sync --no-manifest-update -j$(nproc)
+            for i in 1 2; do repo sync -c -d --no-tags --force-sync --retry-fetches=5 -j$(nproc) --no-manifest-update && break; [ $i = 2 ] && exit 1; echo "repo sync failed, retrying"; sleep 30; done
             echo "Applied manifest PR #$PR_NUMBER"
           done
 
@@ -296,7 +297,7 @@ jobs:
           echo "First 3 projects in active manifest:"
           head -20 .repo/manifest.xml 2>/dev/null | grep '<project' | head -3
 
-          repo sync -c -d --no-tags --force-sync -j$(nproc)
+          for i in 1 2; do repo sync -c -d --no-tags --force-sync --retry-fetches=5 -j$(nproc) && break; [ $i = 2 ] && exit 1; echo "repo sync failed, retrying"; sleep 30; done
 
           # Restore pr_info for cherry-pick step
           cp /tmp/pr_info_* . 2>/dev/null || true
